@@ -50,8 +50,6 @@ static void bus_init(void)
     }
 }
 
-/* Advance simulated time by one millisecond: deliver pending frames,
- * then service every powered node. */
 static void bus_step(void)
 {
     mosaik_frame_t pending[QUEUE_LEN];
@@ -101,8 +99,6 @@ static int leader_index(void)
     return -1;
 }
 
-/* ---- assertions ---- */
-
 static int g_failures = 0;
 static int g_checks = 0;
 
@@ -114,8 +110,6 @@ static void check(bool cond, const char *req, const char *what)
         printf("  FAIL [%s] %s\n", req, what);
     }
 }
-
-/* ---- test cases ---- */
 
 /* TC-001 / REQ-002: a single leader emerges and stays unique. */
 static void tc_001_single_leader(void)
@@ -157,8 +151,6 @@ static void tc_003_failover_latency(void)
     check(old_leader >= 0, "REQ-004", "a leader existed before the fault");
     if (old_leader < 0) { return; }
 
-    /* Fault injection: the leader loses power. It stops ticking and
-     * stops transmitting, exactly as the hardware bench will do. */
     g_bus.powered[old_leader] = false;
     kill_ms = g_bus.now_ms;
 
@@ -180,8 +172,7 @@ static void tc_003_failover_latency(void)
            old_leader + 1, new_leader + 1, elapsed);
 }
 
-/* TC-004 / REQ-005: a leader observing a same-term peer leader latches SAFE
- * within the receive path, with no deferral to the next tick. */
+/* TC-004 / REQ-005: SAFE latched inside the receive path. */
 static void tc_004_safe_on_split_brain(void)
 {
     mosaik_msg_t msg;
@@ -196,7 +187,6 @@ static void tc_004_safe_on_split_brain(void)
     check(li >= 0, "REQ-005", "a leader existed before the injection");
     if (li < 0) { return; }
 
-    /* Inject a forged heartbeat from another node claiming the same term. */
     msg.type = MOSAIK_MSG_HEARTBEAT;
     msg.src  = (uint8_t)(((li + 1) % N_NODES) + 1);
     msg.version = MOSAIK_PROTO_VERSION;
@@ -217,8 +207,7 @@ static void tc_004_safe_on_split_brain(void)
            latency);
 }
 
-/* TC-005 / REQ-003: a lone survivor cannot reach quorum and must not
- * declare itself leader; it latches SAFE instead. */
+/* TC-005 / REQ-003: a lone survivor cannot reach quorum. */
 static void tc_005_no_quorum(void)
 {
     int li, survivor = -1, i;
@@ -231,7 +220,6 @@ static void tc_005_no_quorum(void)
     for (i = 0; i < N_NODES; i++) {
         if (i != li && survivor < 0) { survivor = i; }
     }
-    /* Power down every node except one. */
     for (i = 0; i < N_NODES; i++) {
         if (i != survivor) { g_bus.powered[i] = false; }
     }
@@ -270,7 +258,6 @@ static void tc_006_codec(void)
           out.role == in.role && out.state == in.state && out.type == in.type,
           "codec", "round-trip preserves every field");
 
-    /* Flip one bit in each payload byte in turn; all must be rejected. */
     for (i = 0; i < 8; i++) {
         mosaik_frame_t bad;
         mosaik_msg_t dummy;
@@ -279,4 +266,20 @@ static void tc_006_codec(void)
         if (!mosaik_decode(&bad, &dummy)) { rejected++; }
     }
     check(rejected == 8, "codec", "single-bit corruption rejected in all 8 bytes");
-    printf("        %d/8 single
+    printf("        %d/8 single-bit corruptions rejected\n", rejected);
+}
+
+int main(void)
+{
+    printf("MOSAIK HIL bench - host test suite\n");
+    printf("----------------------------------\n");
+    tc_001_single_leader();
+    tc_002_no_split_brain();
+    tc_003_failover_latency();
+    tc_004_safe_on_split_brain();
+    tc_005_no_quorum();
+    tc_006_codec();
+    printf("----------------------------------\n");
+    printf("%d checks, %d failures\n", g_checks, g_failures);
+    return g_failures == 0 ? 0 : 1;
+}
