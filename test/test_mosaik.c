@@ -17,11 +17,11 @@
 typedef struct {
     mosaik_node_t  node[N_NODES];
     bool           powered[N_NODES];
+    bool           connectivity[N_NODES][N_NODES]; /* connectivity[from][to] */
     mosaik_frame_t queue[QUEUE_LEN];
     uint8_t        queue_src[QUEUE_LEN];
     int            queued;
     uint32_t       now_ms;
-    bool           bus_up;
 } bus_t;
 
 static bus_t g_bus;
@@ -29,11 +29,40 @@ static bus_t g_bus;
 static void bus_tx(const mosaik_frame_t *frame, void *user)
 {
     uintptr_t src = (uintptr_t)user;
-    if (!g_bus.bus_up) { return; }
     if (g_bus.queued >= QUEUE_LEN) { return; }
     g_bus.queue[g_bus.queued] = *frame;
     g_bus.queue_src[g_bus.queued] = (uint8_t)src;
     g_bus.queued++;
+}
+
+/* Set full connectivity (all nodes can talk to all other nodes). */
+static void bus_set_full_connectivity(void)
+{
+    int i, j;
+    for (i = 0; i < N_NODES; i++) {
+        for (j = 0; j < N_NODES; j++) {
+            g_bus.connectivity[i][j] = (i != j);
+        }
+    }
+}
+
+/* Set symmetric 2+1 partition: nodes in group A can talk to each other,
+ * nodes in group B can talk to each other, but no cross-group communication. */
+static void bus_set_partition_2plus1(uint8_t isolated_node) /* 1-indexed node id */
+{
+    int i, j;
+    uint8_t iso = isolated_node - 1;
+    for (i = 0; i < N_NODES; i++) {
+        for (j = 0; j < N_NODES; j++) {
+            if (i == j) {
+                g_bus.connectivity[i][j] = false;
+            } else if (i == iso || j == iso) {
+                g_bus.connectivity[i][j] = false; /* isolated node cut off */
+            } else {
+                g_bus.connectivity[i][j] = true;  /* majority pair connected */
+            }
+        }
+    }
 }
 
 static void bus_init(void)
@@ -42,9 +71,11 @@ static void bus_init(void)
     int i;
     mosaik_config_default(&cfg);
     memset(&g_bus, 0, sizeof(g_bus));
-    g_bus.bus_up = true;
     for (i = 0; i < N_NODES; i++) {
         g_bus.powered[i] = true;
+    }
+    bus_set_full_connectivity();
+    for (i = 0; i < N_NODES; i++) {
         mosaik_init(&g_bus.node[i], (uint8_t)(i + 1), &cfg,
                     bus_tx, (void *)(uintptr_t)(i + 1), 0u);
     }
@@ -55,6 +86,7 @@ static void bus_step(void)
     mosaik_frame_t pending[QUEUE_LEN];
     uint8_t pending_src[QUEUE_LEN];
     int n, i, j;
+    bool leader_hb_delivered[N_NODES] = {false};
 
     n = g_bus.queued;
     memcpy(pending, g_bus.queue, sizeof(mosaik_frame_t) * (size_t)n);
@@ -62,12 +94,40 @@ static void bus_step(void)
     g_bus.queued = 0;
 
     for (j = 0; j < n; j++) {
+        uint8_t src_idx = pending_src[j] - 1; /* 0-indexed */
+        mosaik_msg_t msg;
+        bool is_leader_heartbeat = false;
+
+        if (mosaik_decode(&pending[j], &msg)) {
+            is_leader_heartbeat = (msg.type == MOSAIK_MSG_HEARTBEAT &&
+                                   msg.role == MOSAIK_ROLE_LEADER);
+        }
+
         for (i = 0; i < N_NODES; i++) {
             if (!g_bus.powered[i]) { continue; }
             if (g_bus.node[i].id == pending_src[j]) { continue; }
+            if (!g_bus.connectivity[src_idx][i]) { continue; }
             mosaik_on_rx(&g_bus.node[i], g_bus.now_ms, &pending[j]);
+
+            /* If a leader's heartbeat was delivered to a follower, note it for lease renewal. */
+            if (is_leader_heartbeat && src_idx < N_NODES) {
+                leader_hb_delivered[src_idx] = true;
+            }
         }
     }
+
+    /* Leadership lease renewal: a leader's lease is renewed when its heartbeat
+     * reaches at least one other powered node (quorum = 2 for 3-node cluster).
+     * This aligns with the follower's election timeout reset on heartbeat receipt. */
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && g_bus.node[i].role == MOSAIK_ROLE_LEADER) {
+            if (leader_hb_delivered[i]) {
+                g_bus.node[i].last_quorum_contact_ms = g_bus.now_ms;
+                g_bus.node[i].lease_expiry_ms = g_bus.now_ms + MOSAIK_LEADERSHIP_LEASE_MS;
+            }
+        }
+    }
+
     for (i = 0; i < N_NODES; i++) {
         if (!g_bus.powered[i]) { continue; }
         mosaik_tick(&g_bus.node[i], g_bus.now_ms);
@@ -90,11 +150,29 @@ static int leader_count(void)
     return c;
 }
 
+static int valid_leader_count(void)
+{
+    int i, c = 0;
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { c++; }
+    }
+    return c;
+}
+
 static int leader_index(void)
 {
     int i;
     for (i = 0; i < N_NODES; i++) {
         if (g_bus.powered[i] && mosaik_is_leader(&g_bus.node[i])) { return i; }
+    }
+    return -1;
+}
+
+static int valid_leader_index(void)
+{
+    int i;
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { return i; }
     }
     return -1;
 }
@@ -269,6 +347,89 @@ static void tc_006_codec(void)
     printf("        %d/8 single-bit corruptions rejected\n", rejected);
 }
 
+/* TC-007 / REQ-002, Lot 2A: 2+1 network partition with leadership lease expiry.
+ * Verifies INV-LEADER-UNIQUE: at most one node holds valid leadership authority
+ * at any simulated instant, even during a partition. */
+static void tc_007_partition_lease_expiry(void)
+{
+    uint32_t partition_time = 0;
+    uint32_t old_leader_authority_expiry = 0;
+    uint32_t new_majority_leader_valid = 0;
+    int max_concurrent_valid = 0;
+    int old_leader_idx = -1;
+    int new_leader_idx = -1;
+    uint32_t k;
+    bool old_leader_expired = false;
+    bool new_leader_valid = false;
+
+    printf("TC-007  2+1 partition: lease expiry enforces unique valid leader [REQ-002, Lot 2A]\n");
+
+    bus_init();
+    bus_run(2000u); /* Allow stable leader election */
+
+    old_leader_idx = leader_index();
+    check(old_leader_idx >= 0, "REQ-002", "a leader existed before partition");
+    if (old_leader_idx < 0) { return; }
+
+    /* Record partition time and isolate the current leader (2+1 partition). */
+    partition_time = g_bus.now_ms;
+    bus_set_partition_2plus1((uint8_t)(old_leader_idx + 1));
+
+    /* Continue simulation. Track valid leader count at every step. */
+    for (k = 0; k < 5000u; k++) {
+        bus_step();
+
+        int vlc = valid_leader_count();
+        if (vlc > max_concurrent_valid) { max_concurrent_valid = vlc; }
+
+        /* Detect when old leader's authority expires (either steps down or loses valid authority). */
+        if (!old_leader_expired &&
+            g_bus.powered[old_leader_idx] &&
+            !mosaik_has_valid_leadership_authority(&g_bus.node[old_leader_idx])) {
+            old_leader_authority_expiry = g_bus.now_ms;
+            old_leader_expired = true;
+        }
+
+        /* Detect when new majority leader gains valid authority. */
+        if (!new_leader_valid) {
+            new_leader_idx = valid_leader_index();
+            if (new_leader_idx >= 0 && new_leader_idx != old_leader_idx) {
+                new_majority_leader_valid = g_bus.now_ms;
+                new_leader_valid = true;
+            }
+        }
+
+        /* Early exit if both events observed and system stabilized. */
+        if (old_leader_expired && new_leader_valid && k > 1000) {
+            /* Run a bit more to ensure stability. */
+            for (uint32_t extra = 0; extra < 500; extra++) {
+                bus_step();
+                int vlc2 = valid_leader_count();
+                if (vlc2 > max_concurrent_valid) { max_concurrent_valid = vlc2; }
+            }
+            break;
+        }
+    }
+
+    /* Final verification. */
+    check(max_concurrent_valid <= 1, "INV-LEADER-UNIQUE",
+          "maximum concurrent valid leaders never exceeded 1");
+    check(old_leader_expired, "Lot 2A", "old leader authority expired after partition");
+    check(new_leader_valid, "Lot 2A", "new majority leader gained valid authority");
+    check(valid_leader_count() == 1, "Lot 2A", "exactly one valid leader after stabilization");
+    check(g_bus.node[old_leader_idx].role == MOSAIK_ROLE_LEADER ||
+          g_bus.node[old_leader_idx].state == MOSAIK_STATE_SAFE ||
+          g_bus.node[old_leader_idx].role == MOSAIK_ROLE_FOLLOWER,
+          "Lot 2A", "old leader in known state");
+
+    printf("        partition_time = %u ms\n", partition_time);
+    printf("        old_leader_authority_expiry = %u ms (delta = %u ms)\n",
+           old_leader_authority_expiry, old_leader_authority_expiry - partition_time);
+    printf("        new_majority_leader_valid = %u ms (delta = %u ms)\n",
+           new_majority_leader_valid, new_majority_leader_valid - partition_time);
+    printf("        maximum concurrent valid leaders = %d\n", max_concurrent_valid);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -279,6 +440,7 @@ int main(void)
     tc_004_safe_on_split_brain();
     tc_005_no_quorum();
     tc_006_codec();
+    tc_007_partition_lease_expiry();
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

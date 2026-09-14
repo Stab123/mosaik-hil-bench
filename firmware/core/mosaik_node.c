@@ -99,11 +99,13 @@ static void start_election(mosaik_node_t *n)
 
 static void become_leader(mosaik_node_t *n)
 {
-    n->role             = MOSAIK_ROLE_LEADER;
-    n->leader_id        = n->id;
-    n->state            = MOSAIK_STATE_NOMINAL;
-    n->failed_elections = 0u;
-    n->became_leader_ms = n->now_ms;
+    n->role                     = MOSAIK_ROLE_LEADER;
+    n->leader_id                = n->id;
+    n->state                    = MOSAIK_STATE_NOMINAL;
+    n->failed_elections         = 0u;
+    n->became_leader_ms         = n->now_ms;
+    n->last_quorum_contact_ms   = n->now_ms;
+    n->lease_expiry_ms          = n->now_ms + MOSAIK_LEADERSHIP_LEASE_MS;
     emit(n, MOSAIK_MSG_HEARTBEAT, n->seq++);
 }
 
@@ -130,6 +132,8 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
     node->safe_entry_ms = 0u;
     node->safe_trigger_ms = 0u;
     node->decode_errors = 0u;
+    node->last_quorum_contact_ms = now_ms;
+    node->lease_expiry_ms = now_ms;
     node->tx = tx;
     node->user = user;
     node->deadline_ms = now_ms + election_timeout(node);
@@ -179,7 +183,12 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         node->state            = MOSAIK_STATE_NOMINAL;
         node->failed_elections = 0u;
         node->last_hb_rx_ms    = now_ms;
-        node->deadline_ms      = now_ms + election_timeout(node);
+        /* Leadership lease: followers must not challenge the leader until the
+         * lease expires (500 ms). This enforces INV-LEADER-UNIQUE during
+         * network partitions. A small random jitter is added after the lease
+         * to prevent synchronized elections if the partition heals. */
+        node->deadline_ms      = now_ms + MOSAIK_LEADERSHIP_LEASE_MS +
+                                 (rng_next(node) % 50u);
         break;
 
     case MOSAIK_MSG_VOTE_REQ:
@@ -230,8 +239,16 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
     }
 
     if (node->role == MOSAIK_ROLE_LEADER) {
-        if ((now_ms - node->last_tx_ms) >= node->cfg.heartbeat_period_ms) {
-            emit(node, MOSAIK_MSG_HEARTBEAT, node->seq++);
+        /* Leadership lease check: if lease has expired, the leader loses
+         * valid authority and steps down to follower. It will start a new
+         * election after its election timeout. This ensures INV-LEADER-UNIQUE:
+         * at most one node holds valid leadership authority at any time. */
+        if (now_ms >= node->lease_expiry_ms) {
+            become_follower(node, node->term);
+        } else {
+            if ((now_ms - node->last_tx_ms) >= node->cfg.heartbeat_period_ms) {
+                emit(node, MOSAIK_MSG_HEARTBEAT, node->seq++);
+            }
         }
         return;
     }
@@ -248,4 +265,12 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
         }
     }
     start_election(node);
+}
+
+bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node)
+{
+    if (node->role != MOSAIK_ROLE_LEADER) {
+        return false;
+    }
+    return node->now_ms < node->lease_expiry_ms;
 }

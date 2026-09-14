@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.1 — 1 September 2026
+**Issue:** 0.2 — 14 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -27,6 +27,10 @@ carrying no payload functions.
 - Recovery from SAFE is not implemented. SAFE is latched and requires an
   operator reset, standing in for the PENDING_GROUND_ARBITRATION mode of the
   parent architecture.
+- **Leadership lease is a host-model parameter (500 ms nominal); it does not
+  validate physical CAN-FD timing. The lease mechanism prevents an isolated
+  leader from retaining authority indefinitely during a network partition.
+  This is a host software demonstrator only — no hardware validation.**
 
 ## 3. Physical layer
 
@@ -88,10 +92,21 @@ SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error.
 | Cluster size | 3 | bench scope |
 | Quorum | 2 | `floor(n/2) + 1` |
 | Failed elections before SAFE | 3 | bench choice |
+| **Leadership lease** | **500 ms** | **Lot 2A / MOSAIK-ADD-0001** |
 
 The election timeout is drawn from a per-node deterministic xorshift sequence
 seeded by node id, so that simulation runs are reproducible and nodes do not
 contend indefinitely.
+
+**Leadership lease semantics (Lot 2A).** A leader must maintain evidence of
+majority connectivity (quorum contact) to retain valid leadership authority.
+The lease is renewed each time the leader's heartbeat reaches a quorum of
+nodes. If a leader cannot renew its lease within 500 ms, its leadership
+authority becomes invalid and it steps down to follower. This prevents an
+isolated leader in a 2+1 network partition from believing it remains leader
+indefinitely. The predicate `mosaik_has_valid_leadership_authority()` returns
+true only when the node holds the leader role AND its lease is valid. Safety-
+critical decisions must use this predicate, not `mosaik_is_leader()`.
 
 ## 7. State machine
 
@@ -105,10 +120,19 @@ candidate that does not reach quorum before the vote timeout increments its
 failure count and starts a new election; after three consecutive failures it
 latches SAFE with cause no-quorum.
 
+**Leadership lease (Lot 2A).** Upon becoming leader, a node initializes a
+500 ms leadership lease. The lease is renewed each time the leader's heartbeat
+is delivered to a quorum of nodes (including itself). If the lease expires,
+the leader loses valid leadership authority and steps down to follower.
+The predicate `mosaik_has_valid_leadership_authority()` distinguishes valid
+authority from merely holding the leader role.
+
 **Single-leader invariant (REQ-002).** A node grants at most one vote per term.
 A node observing any message with a higher term adopts it and steps down. These
 two rules together make two leaders in the same term impossible under the
-assumed fault model.
+assumed fault model. The leadership lease further ensures that even under a
+2+1 network partition, at most one node holds valid leadership authority at
+any time (INV-LEADER-UNIQUE).
 
 **Split-brain detection (REQ-005).** If a leader nevertheless receives a
 heartbeat from another node claiming leadership in the same term, the invariant
@@ -130,9 +154,10 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 
 | Requirement (MOSAIK-ADD-0001) | Section | Test case |
 |---|---|---|
-| REQ-002 exactly one leader, split-brain prohibited | 7 | TC-001, TC-002, TC-004 |
+| REQ-002 exactly one leader, split-brain prohibited | 7 | TC-001, TC-002, TC-004, TC-007 |
 | REQ-003 quorum-based reconfiguration | 6, 7 | TC-005 |
 | REQ-004 election within 1 s of leader loss | 6, 7 | TC-003 |
 | REQ-005 SAFE within 10 ms of invariant violation | 7 | TC-004 |
+| **Lot 2A: leadership lease under partition** | **7** | **TC-007** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.

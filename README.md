@@ -11,8 +11,9 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 16 checks across 6 test cases, run by
-CI on every push.
+with `-Wall -Wextra -Werror` and passes 22 checks across 7 test cases, run by
+CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
+leader from retaining authority indefinitely during a 2+1 network partition.
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -30,6 +31,9 @@ procured. No measured latency is reported anywhere in this repository.
 - Split-brain treated as a violation to be latched, not a condition to
   arbitrate: a leader observing a same-term peer leader enters SAFE inside the
   receive path.
+- **Leadership lease (500 ms) with explicit valid leadership authority
+  predicate (`mosaik_has_valid_leadership_authority()`), verified under a
+  deterministic 2+1 network partition test (TC-007).**
 
 ## What it does not demonstrate
 
@@ -44,5 +48,7 @@ procured. No measured latency is reported anywhere in this repository.
   boards. No radiation tolerance, derating, thermal or vibration argument is
   available, and none is claimed. A flight architecture would assume a
   radiation-tolerant MCU and a separate qualification campaign.
+- **Physical CAN-FD timing validation. The leadership lease is a host-model
+  parameter only. No hardware network partition testing.**
 
 ## Build and test

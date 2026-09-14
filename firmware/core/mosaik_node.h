@@ -9,6 +9,12 @@
  *   REQ-002  exactly one active leader; split-brain prohibited
  *   REQ-004  leader election completes < 1000 ms after leader loss
  *   REQ-005  SAFE mode entered < 10 ms after a critical invariant violation
+ *
+ * Leadership lease (Lot 2A): a leader must maintain evidence of majority
+ * connectivity. The nominal lease is 500 ms. If a leader cannot refresh
+ * its lease within this interval, its leadership authority becomes invalid.
+ * This prevents an isolated old leader from retaining authority indefinitely
+ * during a 2+1 network partition.
  */
 #ifndef MOSAIK_NODE_H
 #define MOSAIK_NODE_H
@@ -28,6 +34,12 @@ typedef struct {
 
 /* Architecture-level defaults from MOSAIK-ADD-0001. */
 void mosaik_config_default(mosaik_config_t *cfg);
+
+/* Leadership lease duration in simulated milliseconds. A leader that cannot
+ * demonstrate majority connectivity within this interval loses valid
+ * leadership authority. This is a host-model parameter; it does not validate
+ * physical CAN-FD timing. */
+#define MOSAIK_LEADERSHIP_LEASE_MS 500u
 
 typedef struct {
     uint8_t          id;
@@ -52,6 +64,10 @@ typedef struct {
     uint32_t         deadline_ms;
     uint32_t         rng;
 
+    /* Leadership lease tracking. */
+    uint32_t         last_quorum_contact_ms; /* last time majority was reachable */
+    uint32_t         lease_expiry_ms;        /* when current lease expires */
+
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;
     uint32_t         safe_entry_ms;
@@ -72,7 +88,15 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
 /* Periodic service. Call at least every heartbeat_period_ms / 4. */
 void mosaik_tick(mosaik_node_t *node, uint32_t now_ms);
 
-/* True while the node holds leadership. */
+/* True while the node holds the leader role. This does NOT imply valid
+ * leadership authority; use mosaik_has_valid_leadership_authority() for
+ * safety-critical decisions. */
 bool mosaik_is_leader(const mosaik_node_t *node);
+
+/* True if the node holds the leader role AND its leadership lease is valid.
+ * A leader must maintain majority connectivity evidence within the lease
+ * interval (500 ms nominal). This is the correct predicate for
+ * leader-dependent safety decisions. */
+bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node);
 
 #endif /* MOSAIK_NODE_H */

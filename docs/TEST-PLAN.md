@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.1 — 1 September 2026
+**Issue:** 0.2 — 14 September 2026
 
 ## 1. Two levels of verification
 
@@ -27,6 +27,7 @@ the traces are committed under `results/`.
 | TC-004 | SAFE latched on same-term dual leader | REQ-005, REQ-002 | pass |
 | TC-005 | Isolated node cannot self-appoint, latches SAFE | REQ-003 | pass |
 | TC-006 | Frame codec round-trip, corrupted frames rejected | — | pass |
+| TC-007 | 2+1 partition: lease expiry enforces unique valid leader | REQ-002, Lot 2A | pass |
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.
@@ -72,3 +73,7 @@ reported, not discarded.
   derating or parts-quality argument is available.
 - Clock drift between nodes is not characterised.
 - Results are valid for the timing parameters of PROTOCOL.md section 6 only.
+- **Leadership lease (500 ms) is a host-model parameter; it does not validate
+  physical CAN-FD timing. TC-007 uses a simulated pairwise connectivity model
+  for the 2+1 partition; no hardware network partition is tested.**
+- **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**
