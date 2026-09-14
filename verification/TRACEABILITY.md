@@ -1,7 +1,7 @@
 # MOSAÏK Bidirectional Traceability
 
 **Document:** MOSAIK-TRACE-001  
-**Issue:** 1.0 — 15 September 2026  
+**Issue:** 1.1 — 15 September 2026  
 **Purpose:** Bidirectional traceability matrix linking ADD requirements ↔ derived requirements ↔ architecture ↔ implementation ↔ test ↔ result ↔ evidence
 
 ---
@@ -12,7 +12,7 @@
 ```
 ADD Requirement (Section 10)
     │
-    ├──→ Derived Requirement (Section 8.2)
+    ├──→ Derived Requirement (Section 82)
     │       │
     │       └──→ Architecture Element (SYSTEM-ARCHITECTURE.md / SOFTWARE-ARCHITECTURE.md)
     │               │
@@ -35,7 +35,7 @@ Test Result / Evidence
                     │
                     └──→ Architecture Element
                             │
-                            └──→ Derived Requirement (Section 8.2)
+                            └──→ Derived Requirement (Section 82)
                                     │
                                     └──→ ADD Root Requirement (Section 10)
 ```
@@ -90,7 +90,7 @@ Test Result / Evidence
 
 | Direction | Trace |
 |-----------|-------|
-| **Forward** | REQ-FUNC-0001 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto (lease) → `mosaik_node.c:lease_expiry_ms, mosaik_has_valid_leadership_authority()` + `test_mosaik.c:connectivity[][]` → TC-007 → PASS (max concurrent valid leaders = 1) → IMPLEMENTED-SIM |
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto (lease) → `mosaik_node.c:lease_expiry_ms, mosaik_has_valid_leadership_authority()` + `test_mosaik.c:connectivity[][]` → TC-007 → PASS (maximum concurrent valid leadership authorities observed at the defined deterministic simulation observation points: 1) → IMPLEMENTED-SIM |
 | **Reverse** | TC-007 → `mosaik_node.c:106, 239-249, 270-276` + `test_mosaik.c:bus_set_partition_2plus1` → lease expiry + valid authority → REQ-FUN-001/002 → REQ-FUNC-0001 |
 
 ---
@@ -105,13 +105,13 @@ Test Result / Evidence
 | TC-004 | REQ-SAFE-0002 | REQ-SAF-001, REQ-PERF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:enter_safe` | PASS (0ms) | IMPLEMENTED-SIM |
 | TC-005 | REQ-FUNC-0002, REQ-SAFE-0003 | REQ-FUN-002, REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:candidate_failures` | PASS | IMPLEMENTED-SIM |
 | TC-006 | REQ-FUNC-0007 | REQ-ICD-002 | svc_mosaik_proto | `mosaik_proto.c:crc8, encode/decode` | PASS | PARTIAL |
-| TC-007 | REQ-FUNC-0001 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:lease` + `test_mosaik.c:partition` | PASS | IMPLEMENTED-SIM |
+| TC-007 | REQ-FUNC-0001 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:lease` + `test_mosaik.c:partition` | PASS (max concurrent valid authorities observed at simulation points: 1) | IMPLEMENTED-SIM |
 
 ---
 
 ## 4. Repository TC-xxx ↔ ADD Test Case Mapping
 
-| Repo Test ID | ADD Section 8.2 Test Case | Mapping Status | Notes |
+| Repo Test ID | ADD Section 82 Test Case | Mapping Status | Notes |
 |--------------|---------------------------|----------------|-------|
 | TC-001 | F-01 (leader election) | PROVISIONAL | Naming differs |
 | TC-002 | F-02 (split-brain absence) | PROVISIONAL | 20s sim vs ADD campaign |
@@ -119,9 +119,9 @@ Test Result / Evidence
 | TC-004 | S-01 (SAFE latch) | PROVISIONAL | Receive path only |
 | TC-005 | F-03 (no quorum SAFE) | PROVISIONAL | 3-node subset |
 | TC-006 | I-01 (codec/CRC) | PROVISIONAL | Correlation_id gap |
-| TC-007 | F-04 (partition lease) | PROVISIONAL | LOT 2A specific |
+| TC-007 | F-04 (partition lease) | PROVISIONAL | LOT 2A specific; PARTIAL evidence for ADD R-04 — exercises one deterministic 3-node 2+1 partition scenario |
 
-**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests.
+**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior.
 
 ---
 

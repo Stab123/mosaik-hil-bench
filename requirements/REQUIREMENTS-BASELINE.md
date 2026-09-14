@@ -1,7 +1,7 @@
 # MOSAÏK Requirements Baseline — Namespace Control
 
 **Document:** MOSAIK-REQBASE-001  
-**Issue:** 1.0 — 15 September 2026  
+**Issue:** 1.1 — 15 September 2026  
 **Purpose:** Defines which requirement namespace controls implementation and documents the dual-namespace finding
 
 ---
@@ -11,9 +11,9 @@
 | Namespace | Source | Authority | Prefix Pattern | Status |
 |-----------|--------|-----------|----------------|--------|
 | **ROOT SYSTEM REQUIREMENTS** | MOSAIK-ADD-0001 Section 10 | **PRIMARY** — controls implementation, verification, and acceptance | REQ-FUNC-xxxx, REQ-SAFE-xxxx, REQ-PERF-xxxx, REQ-ENV-xxxx, REQ-IF-xxxx, REQ-LOG-xxxx | **ACTIVE** |
-| **DERIVED / DETAILED REQUIREMENTS** | MOSAIK-ADD-0001 Section 8.2 | **SECONDARY** — traceability to tests/implementation only | REQ-FUN-xxx, REQ-SAF-xxx, REQ-PERF-xxx, REQ-ICD-xxx, etc. | **ACTIVE** |
+| **DERIVED / DETAILED REQUIREMENTS** | MOSAIK-ADD-0001 Section 82 | **SECONDARY** — traceability to tests/implementation only | REQ-FUN-xxx, REQ-SAF-xxx, REQ-PERF-xxx, REQ-ICD-xxx, etc. | **ACTIVE** |
 
-**Rule:** Until formally resolved by the architecture authority, ROOT requirements (Section 10) are the controlling requirements for implementation decisions. DERIVED requirements (Section 8.2) provide test-level traceability. All mappings must be explicit in `ADD-MAPPING.md` and `TRACEABILITY.md`.
+**Rule:** Until formally resolved by the architecture authority, ROOT requirements (Section 10) are the controlling requirements for implementation decisions. DERIVED requirements (Section 82) provide test-level traceability. All mappings must be explicit in `ADD-MAPPING.md` and `TRACEABILITY.md`.
 
 ---
 
@@ -21,7 +21,7 @@
 
 ### 2.1 Prefix Mapping
 
-| ROOT (Section 10) | DERIVED (Section 8.2) | Notes |
+| ROOT (Section 10) | DERIVED (Section 82) | Notes |
 |-------------------|----------------------|-------|
 | REQ-FUNC-xxxx | REQ-FUN-xxx | Functional |
 | REQ-SAFE-xxxx | REQ-SAF-xxx | Safety |
@@ -75,7 +75,7 @@ The following conditions trigger an ADD finding:
 | Decision | Controlled By |
 |----------|---------------|
 | What to implement | ROOT requirements (Section 10) |
-| How to test | DERIVED requirements (Section 8.2) + test plan |
+| How to test | DERIVED requirements (Section 82) + test plan |
 | Acceptance criteria | ROOT requirements + ADD-FINDINGS resolutions |
 | Evidence claims | CbD/CbA/CbT per `TRACEABILITY.md` |
 | Limitations documentation | Per-lot evidence reports |

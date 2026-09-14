@@ -1,7 +1,7 @@
 # MOSAÏK ADD Findings Register
 
 **Document:** MOSAIK-ADD-FIND-001  
-**Issue:** 1.0 — 15 September 2026  
+**Issue:** 1.1 — 15 September 2026  
 **Purpose:** Formal documentation of discrepancies, conflicts, and interpretations found in MOSAIK-ADD-0001
 
 ---
@@ -11,6 +11,7 @@
 Each finding contains:
 - **ID:** ADD-Fxxx
 - **Source Section(s):** ADD section numbers
+- **Class:** ADD-INTERNAL / IMPLEMENTATION-GAP / VERIFICATION-GAP / TRACEABILITY-GAP
 - **Issue:** Description of discrepancy/conflict
 - **Impact:** Effect on implementation, verification, or acceptance
 - **Proposed Implementation Interpretation:** How the repository will interpret until resolved
@@ -21,14 +22,15 @@ Each finding contains:
 
 ## 2. Findings
 
-### ADD-F001: Requirement Namespace Mismatch (Section 10 vs Section 8.2)
+### ADD-F001: Requirement Namespace Mismatch (Section 10 vs Section 82)
 
 | Field | Detail |
 |-------|--------|
-| **Source** | ADD Section 10 (root requirements) and Section 8.2 (traceability matrix) |
-| **Issue** | Two distinct requirement naming schemes exist:<br/>- Section 10: REQ-FUNC-xxxx, REQ-SAFE-xxxx, REQ-PERF-xxxx, REQ-ENV-xxxx, REQ-IF-xxxx, REQ-LOG-xxxx (4-digit suffix)<br/>- Section 8.2: REQ-FUN-xxx, REQ-SAF-xxx, REQ-PERF-xxx, REQ-ICD-xxx (3-digit suffix)<br/>Prefixes differ (FUNC vs FUN, SAFE vs SAF). Numbering schemes differ. No explicit mapping provided in ADD. |
+| **Source** | ADD Section 10 (root requirements) and Section 82 (traceability matrix) |
+| **Class** | TRACEABILITY-GAP |
+| **Issue** | Two distinct requirement naming schemes exist:<br/>- Section 10: REQ-FUNC-xxxx, REQ-SAFE-xxxx, REQ-PERF-xxxx, REQ-ENV-xxxx, REQ-IF-xxxx, REQ-LOG-xxxx (4-digit suffix)<br/>- Section 82: REQ-FUN-xxx, REQ-SAF-xxx, REQ-PERF-xxx, REQ-ICD-xxx (3-digit suffix)<br/>Prefixes differ (FUNC vs FUN, SAFE vs SAF). Numbering schemes differ. No explicit mapping provided in ADD. |
 | **Impact** | Cannot automatically trace root requirements to test cases. Implementation decisions may reference wrong namespace. Verification evidence may be attributed to wrong requirement. |
-| **Proposed Interpretation** | Section 10 = ROOT SYSTEM REQUIREMENTS (controlling). Section 8.2 = DERIVED/DETAILED REQUIREMENTS (test traceability). Explicit mapping table maintained in `REQUIREMENTS-BASELINE.md` and `ADD-MAPPING.md`. All mappings marked PROVISIONAL until architecture review. |
+| **Proposed Interpretation** | Section 10 = ROOT SYSTEM REQUIREMENTS (controlling). Section 82 = DERIVED/DETAILED REQUIREMENTS (test traceability). Explicit mapping table maintained in `REQUIREMENTS-BASELINE.md` and `ADD-MAPPING.md`. All mappings marked PROVISIONAL until architecture review. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -37,9 +39,10 @@ Each finding contains:
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 10: REQ-FUNC-0001 states "one and only one active leader **outside a declared partition**".<br/>ADD Safety language (implied in detailed requirements) may require leader uniqueness "at all times". |
-| **Issue** | The phrase "outside a declared partition" implies that *during* a declared partition, multiple leaders might be permitted. However, safety-critical systems typically require leader uniqueness at all times. The detailed safety requirements (Section 8.2) do not explicitly qualify the uniqueness claim with "outside partition". |
+| **Class** | ADD-INTERNAL |
+| **Issue** | The phrase "outside a declared partition" implies that *during* a declared partition, multiple leaders might be permitted. However, safety-critical systems typically require leader uniqueness at all times. The detailed safety requirements (Section 82) do not explicitly qualify the uniqueness claim with "outside partition". |
 | **Impact** | LOT 2A implementation enforces leader uniqueness **at all times** via lease expiry (INV-LEADER-UNIQUE: max 1 valid authority at every simulation point). This is stricter than the literal reading of REQ-FUNC-0001. If the ADD intent permits multiple leaders during partition, LOT 2A over-constrains. If the ADD intent is uniqueness at all times, the "outside declared partition" wording is misleading. |
-| **Proposed Interpretation** | Implement uniqueness at all times (current LOT 2A behavior). Document the discrepancy. Request architecture clarification. The lease mechanism ensures that even during partition, only one node holds *valid* leadership authority. |
+| **Proposed Interpretation** | Implement uniqueness at all times (current LOT 2A behavior). Document the discrepancy. Request architecture clarification. The lease mechanism ensures that even during partition, only one node holds *valid* leadership authority.<br/><br/>**Evidence language:** Current LOT2A evidence must be described as: "Maximum concurrent valid leadership authorities observed at the defined deterministic simulation observation points: 1." Do NOT state "leader uniqueness at every possible instant is proven" or equivalent. The implementation policy may remain conservative: valid leadership authority should remain unique during tested partitions. But distinguish: DESIGN INTENT from TESTED EVIDENCE from FORMAL PROOF. Formal proof belongs to LOT 10. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -48,20 +51,22 @@ Each finding contains:
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 4 (system modes) vs Repository implementation vs ADD Section 10 requirements |
+| **Class** | TRACEABILITY-GAP, IMPLEMENTATION-GAP |
 | **Issue** | Terminology inconsistencies:<br/>- ADD Section 4 modes: INIT, NOMINAL, ADAPTIVE, DEGRADED, SAFE, PGA (6 modes)<br/>- Repository (LOT 2A): INIT, NOMINAL, DEGRADED, SAFE (4 modes) — ADAPTIVE and PGA not implemented<br/>- ADD Section 10 REQ-FUNC-0005 references "DEGRADED mode"<br/>- Repository uses `MOSAIK_STATE_` prefix: INIT, NOMINAL, DEGRADED, SAFE |
 | **Impact** | Mode-dependent requirements (e.g., REQ-FUNC-0005 "mission remains useful in DEGRADED") cannot be fully verified until ADAPTIVE and PGA are implemented. PGA (Pending Ground Arbitration) is the formal exit from SAFE in ADD; repository has no PGA — SAFE is terminal in simulation. |
 | **Proposed Interpretation** | Repository modes are a subset. ADAPTIVE and PGA marked DESIGN-ONLY in `SOFTWARE-ARCHITECTURE.md`. SAFE latch is terminal in simulation (no ground arbitration path). Document as known gap. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
-### ADD-F004: CAN-FD Bitrate Inconsistency
+### ADD-F004: CAN-FD Bitrate — Protocol Model vs Physical Validation
 
 | Field | Detail |
 |-------|--------|
-| **Source** | ADD Section 3 (Physical Layer) vs ADD Section 6/8.2 (ICD) |
-| **Issue** | Section 3 states: "CAN FD, 500 kbit/s arbitration, 2 Mbit/s data". Section 6 (Protocol) and ICD may reference only 500 kbit/s. Current bench uses Classical CAN 2.0B at 500 kbit/s (ESP32 classic option) — no FD data phase. |
-| **Impact** | Frame format in repository (11-bit ID, 8-byte DLC) is valid for both Classical CAN and CAN-FD. However, FD benefits (larger payload, faster data phase) not utilized. Timing analysis for REQ-PERF-0004 requires FD data phase. |
-| **Proposed Interpretation** | Document current implementation as Classical CAN 2.0B compatible subset. FD data phase marked HARDWARE-REQUIRED (LOT 6). Frame format designed to be FD-compatible (8-byte DLC ≤ 64 bytes FD max). |
+| **Source** | ADD Section 3 (Physical Layer) vs ADD Section 6/82 (ICD) vs Repository implementation |
+| **Class** | IMPLEMENTATION-GAP, VERIFICATION-GAP |
+| **Issue** | Section 3 states: "CAN FD, 500 kbit/s arbitration, 2 Mbit/s data". Section 6 (Protocol) and ICD may reference only 500 kbit/s. Current repository is a host software demonstrator with no physical CAN hardware. The protocol model uses an 11-bit identifier / 8-byte payload representation compatible with a Classical-CAN-sized frame. |
+| **Impact** | No physical CAN-FD bus has been validated. No arbitration/data bitrate has been measured. Frame format in repository is compatible with Classical CAN frame size but FD benefits (larger payload, faster data phase) not utilized. Timing analysis for REQ-PERF-0004 requires FD data phase. |
+| **Proposed Interpretation** | Current protocol model uses an 11-bit identifier / 8-byte payload representation compatible with a Classical-CAN-sized frame. No physical CAN-FD bus has been validated. No arbitration/data bitrate has been measured. ADD target remains: CAN-FD with the normative bitrate/configuration defined by the resolved ADD/ICD baseline. LOT 6 must close the protocol/ICD question. LOT 12/14 must provide physical timing evidence. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -70,9 +75,10 @@ Each finding contains:
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 7 (Environmental) vs Repository limitations |
-| **Issue** | ADD specifies LEO environment: thermal cycling, vibration, radiation. Repository uses commercial development boards (ESP32) at ambient conditions. No environmental qualification. |
-| **Impact** | All CbT claims require flight-representative hardware (LOT 13) and environmental campaign (LOT 14). Current IMPLEMENTED-SIM evidence does not satisfy REQ-ENV-0001. |
-| **Proposed Interpretation** | Explicitly state in all evidence: "Host simulation only — no environmental qualification." Bench is logic verification (TRL 3), not environmental. |
+| **Class** | VERIFICATION-GAP |
+| **Issue** | ADD specifies LEO environment: thermal cycling, vibration, radiation. Repository uses commercial development boards at ambient conditions. No environmental qualification. |
+| **Impact** | All CbT claims require flight-representative hardware (LOT 13) and environmental campaign (LOT 14). Current IMPLEMENTED-SIM evidence does not satisfy REQ-ENV-0001. HIL/engineering hardware testing is separate from environmental qualification hardware and campaign. |
+| **Proposed Interpretation** | Explicitly state in all evidence: "Host simulation only — no environmental qualification." Bench is logic verification (TRL 3), not environmental. Keep all relevant ENV requirements: HARDWARE-REQUIRED / TBC as appropriate. No CbT claim. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -80,10 +86,11 @@ Each finding contains:
 
 | Field | Detail |
 |-------|--------|
-| **Source** | ADD Section 8.2 (traceability matrix) vs Repository test cases |
+| **Source** | ADD Section 82 (traceability matrix) vs Repository test cases |
+| **Class** | TRACEABILITY-GAP |
 | **Issue** | ADD test case IDs (e.g., F-01, S-01, P-01, I-01) do not match repository TC-xxx IDs. Some ADD test cases combine multiple requirements; repository tests are granular (one requirement per test where possible). ADD matrix may have gaps or duplications not yet fully transcribed. |
 | **Impact** | Traceability requires explicit mapping table (`TRACEABILITY.md`). Cannot rely on ID matching. |
-| **Proposed Interpretation** | Maintain explicit mapping in `TRACEABILITY.md` Section 4. Repository TC-xxx IDs preserved. ADD test case IDs mapped provisionally. |
+| **Proposed Interpretation** | Maintain explicit mapping in `TRACEABILITY.md` Section 4. Repository TC-xxx IDs preserved. ADD test case IDs mapped provisionally. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT2A TC-007 is only PARTIAL evidence toward ADD R-04 because it exercises one deterministic 3-node 2+1 partition scenario. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -92,20 +99,22 @@ Each finding contains:
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 10 REQ-FUNC-0007: "Critical CAN messages include CRC and correlation_id" |
+| **Class** | IMPLEMENTATION-GAP |
 | **Issue** | Current protocol (PROTOCOL.md, `mosaik_proto.c`) implements CRC-8 (SAE-J1850) but **no correlation_id field** in the 8-byte payload. Payload bytes 0-6 are fully allocated (version, src, role, state, term[2], arg). No room for correlation_id without frame format change. |
 | **Impact** | REQ-FUNC-0007 partially implemented (CRC yes, correlation_id no). Traceability (REQ-LOG-0002) requires correlation_id for timeline reconstruction. |
-| **Proposed Interpretation** | Mark as PARTIAL in `ADD-MAPPING.md`. Correlation_id requires either:<br/>a) Extended CAN-FD frame (64 bytes) — LOT 6<br/>b) Separate correlation message — architecture decision needed<br/>Document as gap. |
+| **Proposed Interpretation** | Mark as PARTIAL in `ADD-MAPPING.md`. CRC capability: implemented in current protocol model. correlation_id: missing. Wire-format allocation for correlation_id is TBC in LOT 6. Do NOT choose the future wire-format solution in LOT0. Do not decide now between: a) larger CAN-FD payload, b) separate message, c) another encoding. That architecture decision belongs to LOT 6. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
-### ADD-F008: Quorum Definition — Cluster Size Dependency
+### ADD-F008: Quorum Definition — Voting Membership Not Fully Specified in ADD
 
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 10 REQ-FUNC-0002: "major reconfiguration requires formal majority quorum" vs Repository 3-node subset |
-| **Issue** | ADD defines 6-node cluster (3 EN + CN + COMN + GSE). Quorum = 4. Repository tests 3-node subset with quorum = 2. REQ-FUNC-0002 verified only for 3-node case. |
-| **Impact** | Quorum logic (`floor(n/2)+1`) is generalizable, but not tested for 6-node. Failure modes differ (e.g., 2-node loss in 6-node = 4 remaining = quorum; 2-node loss in 3-node = 1 remaining = no quorum). |
-| **Proposed Interpretation** | Document as PARTIAL. 3-node subset verified. 6-node quorum behavior DESIGN-ONLY until LOT 8. |
+| **Class** | ADD-INTERNAL, IMPLEMENTATION-GAP |
+| **Issue** | The ADD V1 physical architecture lists: EN-1, EN-2, EN-3, CN-1, COMN-1, GSE-1 ground station / MCC. GSE must NOT automatically be counted as a consensus voting member. The presence of 3 EN + CN + COMN + GSE does not by itself establish a six-voter quorum. The repository currently verifies majority behavior only on a 3-node logical cluster. The voting membership of EN/CN/COMN and the role of GSE in consensus must be derived explicitly from the normative consensus architecture. GSE shall not be assumed to vote merely because it appears in the physical architecture. |
+| **Impact** | The generic majority expression floor(N/2)+1 may be implemented, but evidence from the 3-node LOT2A test does not verify every target MOSAÏK membership configuration. Do NOT state "6-node quorum = 4" unless directly demonstrated by a normative ADD passage. |
+| **Proposed Interpretation** | Preserve generic majority computation. Classify 3-node quorum behavior as IMPLEMENTED-SIM. Classify full target-cluster voting membership as TBC/DESIGN-ONLY. Explicitly state that GSE is not counted as a voter unless a normative ADD requirement explicitly assigns it voting authority. Resolve exact voting membership before LOT 8 closure. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -114,20 +123,22 @@ Each finding contains:
 | Field | Detail |
 |-------|--------|
 | **Source** | ADD Section 4: PGA (Pending Ground Arbitration) is exit from SAFE. Repository: SAFE is terminal (no exit implemented). |
+| **Class** | IMPLEMENTATION-GAP |
 | **Issue** | ADD requires ground arbitration to exit SAFE. Repository latches SAFE permanently (simulation only). No GSE/COMN path implemented. |
 | **Impact** | REQ-SAFE-0003 (SAFE irreversible without ground arbitration) implemented as "irreversible period" in simulation. PGA not tested. |
 | **Proposed Interpretation** | Software latch implemented. PGA marked DESIGN-ONLY (LOT 3, 8). Document in limitations. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
-### ADD-F010: Heartbeat Period Tolerance
+### ADD-F010: Heartbeat Root/Derived Timing Traceability
 
 | Field | Detail |
 |-------|--------|
-| **Source** | ADD Section 10 REQ-FUNC-0003: "heartbeat nominal period 100 ms" — no tolerance specified. REQ-PERF-0003: "100 ms ± tolerance" — tolerance value not given. |
-| **Issue** | Repository uses exactly 100 ms (configured). No jitter/tolerance modeled. Election timeout (300-500 ms) implies 3-5 missed heartbeats tolerance. |
-| **Impact** | Timing margins not fully specified. Hardware clock drift not characterized (LOT 14). |
-| **Proposed Interpretation** | Nominal 100 ms implemented. Tolerance derived from election timeout margins (3-5 periods). Document as TBC — requires ADD clarification. |
+| **Source** | ADD Section 10 REQ-FUNC-0003: "heartbeat nominal period 100 ms" and ADD Section 82 REQ-FUN-006: "Each node emits cluster heartbeat at: 10 Hz ± 2 %" |
+| **Class** | TRACEABILITY-GAP |
+| **Issue** | The root requirement layer expresses heartbeat nominally as 100 ms, while the detailed/derived requirement layer specifies 10 Hz ±2 %. This is not an "unknown tolerance". It is a requirement-layer relationship that must be traced explicitly. |
+| **Impact** | Repository uses exactly 100 ms nominal timing only. Jitter/tolerance compliance: NOT YET VERIFIED. Hardware clock drift/timing: NOT VERIFIED. |
+| **Proposed Interpretation** | Root: 100 ms nominal heartbeat period. Derived: 10 Hz ±2 %. Equivalent nominal frequency: 10 Hz. Use the derived ±2 % requirement as the verification tolerance unless a higher-level conflict is discovered. Current host implementation: 100 ms nominal timing only. Jitter/tolerance compliance: NOT YET VERIFIED. Hardware clock drift/timing: NOT VERIFIED. |
 | **Status** | OPEN |
 | **Resolution** | — |
 
@@ -135,18 +146,18 @@ Each finding contains:
 
 ## 3. Finding Status Summary
 
-| ID | Title | Status |
-|----|-------|--------|
-| ADD-F001 | Requirement Namespace Mismatch | OPEN |
-| ADD-F002 | Leader Uniqueness Scope | OPEN |
-| ADD-F003 | System Mode Terminology | OPEN |
-| ADD-F004 | CAN-FD Bitrate Inconsistency | OPEN |
-| ADD-F005 | Environmental Requirements | OPEN |
-| ADD-F006 | Test ID Mapping Inconsistencies | OPEN |
-| ADD-F007 | Correlation_ID Missing | OPEN |
-| ADD-F008 | Quorum Definition / Cluster Size | OPEN |
-| ADD-F009 | SAFE Exit / PGA | OPEN |
-| ADD-F010 | Heartbeat Period Tolerance | OPEN |
+| ID | Title | Class | Status |
+|----|-------|-------|--------|
+| ADD-F001 | Requirement Namespace Mismatch | TRACEABILITY-GAP | OPEN |
+| ADD-F002 | Leader Uniqueness Scope | ADD-INTERNAL | OPEN |
+| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | OPEN |
+| ADD-F004 | CAN-FD Bitrate — Protocol Model vs Physical Validation | IMPLEMENTATION-GAP, VERIFICATION-GAP | OPEN |
+| ADD-F005 | Environmental Requirements | VERIFICATION-GAP | OPEN |
+| ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | OPEN |
+| ADD-F007 | Correlation_ID in Critical Messages | IMPLEMENTATION-GAP | OPEN |
+| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN |
+| ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | OPEN |
+| ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | OPEN |
 
 **Total:** 10 findings, all OPEN.  
 **Next review:** LOT 0 closure / architecture review board.

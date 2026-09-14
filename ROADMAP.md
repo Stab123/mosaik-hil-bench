@@ -18,7 +18,7 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 
 | Lot | Title | Scope | Status |
 |-----|-------|-------|--------|
-| **LOT 0** | ADD Baseline, Repository Architecture, Traceability | Governance, requirements transcription, architecture documentation, bidirectional traceability, ADD findings | **IN PROGRESS** |
+| **LOT 0** | ADD Baseline, Repository Architecture, Traceability | Governance, requirements transcription, architecture documentation, bidirectional traceability, ADD findings | **COMPLETE (with open tracked findings)** |
 | **LOT 1** | Core Protocol Foundations | Wire protocol, frame format, CRC, identifiers, basic state machine | NOT STARTED |
 | **LOT 2** | Distributed Leadership and Authority | Leader election, quorum, lease, partitions, recovery | PARTIAL |
 | **LOT 2A** | Leader Lease / 2+1 Partition | 500 ms leadership lease, explicit valid authority, deterministic 2+1 partition test | **IMPLEMENTED (host sim)** |
@@ -111,3 +111,42 @@ All evidence in this repository uses these classifications:
 - All findings documented in `ADD-FINDINGS.md` with explicit status
 - Simulation evidence never converted to hardware compliance
 - No merge to `main` until LOT 15 release criteria met
+
+---
+
+## 8. LOT 0 Closure Status
+
+**LOT 0 establishes the controlled baseline and traceability framework.**
+
+**LOT 0 does NOT mean:**
+- every ADD requirement is implemented
+- every ADD inconsistency is resolved
+- hardware is validated
+- HIL is complete
+- system qualification is complete
+- TRL 4 has been achieved
+
+**Open findings are allowed to remain open if:**
+- they are explicitly documented
+- their impact is known
+- they have a planned closure Lot
+- they do not prevent the next software development Lot
+
+**LOT 0 is therefore CLOSED WITH OPEN TRACKED FINDINGS.**
+
+### Open Tracked Findings (Non-Blocking for LOT 1+)
+
+| ID | Title | Class | Planned Closure |
+|----|-------|-------|-----------------|
+| ADD-F001 | Requirement Namespace Mismatch | TRACEABILITY-GAP | Architecture review |
+| ADD-F002 | Leader Uniqueness Scope | ADD-INTERNAL | Architecture review / LOT 10 |
+| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | LOT 4 |
+| ADD-F004 | CAN-FD Bitrate — Protocol Model vs Physical Validation | IMPLEMENTATION-GAP, VERIFICATION-GAP | LOT 6, 12, 14 |
+| ADD-F005 | Environmental Requirements | VERIFICATION-GAP | LOT 13, 14 |
+| ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | Ongoing |
+| ADD-F007 | Correlation_ID in Critical Messages | IMPLEMENTATION-GAP | LOT 6 |
+| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | LOT 8 |
+| ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | LOT 3, 8 |
+| ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | Architecture review / LOT 6 |
+
+**No blocking findings for LOT 1 start.**
