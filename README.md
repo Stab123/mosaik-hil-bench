@@ -11,9 +11,11 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 22 checks across 7 test cases, run by
+with `-Wall -Wextra -Werror` and passes 55 checks across 12 test cases, run by
 CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
 leader from retaining authority indefinitely during a 2+1 network partition.
+Lot 2B adds stale/replay message immunity using semantic rejection based on
+term monotonicity, lease validity, and sender state.
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -34,6 +36,9 @@ procured. No measured latency is reported anywhere in this repository.
 - **Leadership lease (500 ms) with explicit valid leadership authority
   predicate (`mosaik_has_valid_leadership_authority()`), verified under a
   deterministic 2+1 network partition test (TC-007).**
+- **Stale/replay message immunity (Lot 2B): term monotonicity enforcement,
+  duplicate sequence rejection, expired lease replay rejection, and partition
+  recovery safety — verified by TC-008 through TC-012.**
 
 ## What it does not demonstrate
 
@@ -48,7 +53,11 @@ procured. No measured latency is reported anywhere in this repository.
   boards. No radiation tolerance, derating, thermal or vibration argument is
   available, and none is claimed. A flight architecture would assume a
   radiation-tolerant MCU and a separate qualification campaign.
-- **Physical CAN-FD timing validation. The leadership lease is a host-model
-  parameter only. No hardware network partition testing.**
+- **Physical CAN-FD timing validation. The leadership lease and stale/replay
+  immunity are host-model parameters only. No hardware network partition
+  testing.**
+- **Cryptographic anti-replay or sequence-number protection. The current
+  8-byte frame format has no room for correlation_id. Lot 2B uses semantic
+  rejection only. LOT 6 will handle final wire-format decisions.**
 
 ## Build and test

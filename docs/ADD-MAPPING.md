@@ -1,7 +1,7 @@
 # MOSAÏK ADD-to-Implementation Mapping
 
 **Document:** MOSAIK-ADD-MAP-001  
-**Issue:** 1.0 — 15 September 2026  
+**Issue:** 1.1 — 15 September 2026  
 **Purpose:** Master implementation map linking ADD requirements to architecture, code, tests, and evidence
 
 ---
@@ -27,7 +27,7 @@
 
 | ADD Section | Requirement ID | Requirement Summary | Target Component | GitHub Implementation | Test | Evidence | LOT | Status | Gap / Limitation |
 |-------------|----------------|---------------------|------------------|----------------------|------|----------|-----|--------|------------------|
-| 10 / 82 | REQ-FUNC-0001 / REQ-FUN-001 | One active leader outside declared partition | L4: svc_mosaik_proto, L5: Cluster_Task | `firmware/core/mosaik_node.c/h` | TC-001, TC-002, TC-007 | LOT2A_LEADER_LEASE_REPORT.md | 2A | PARTIAL | Host sim only; 3-node subset; "outside declared partition" vs "at all times" (ADD-F002) |
+| 10 / 82 | REQ-FUNC-0001 / REQ-FUN-001 | One active leader outside declared partition | L4: svc_mosaik_proto, L5: Cluster_Task | `firmware/core/mosaik_node.c/h` | TC-001, TC-002, TC-007, TC-008, TC-009, TC-010, TC-011, TC-012 | LOT2A_LEADER_LEASE_REPORT.md, LOT2B_STALE_REPLAY_REPORT.md | 2A, 2B | PARTIAL | Host sim only; 3-node subset; "outside declared partition" vs "at all times" (ADD-F002) |
 | 10 / 82 | REQ-FUNC-0002 / REQ-FUN-002 | Quorum required for reconfiguration | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (quorum func) | TC-005, TC-007 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | 3-node quorum=2 only; not universal proof; GSE voting role TBC (ADD-F008) |
 | 10 / 82 | REQ-FUNC-0003 / REQ-FUN-003 | Heartbeat nominal period 100 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (heartbeat_period_ms=100) | TC-001, TC-006 | PROTOCOL.md §6 | 1 | IMPLEMENTED-SIM | Period configured; not measured on hardware; derived tolerance ±2% (ADD-F010) |
 | 10 / 82 | REQ-FUNC-0004 / REQ-PERF-001 | Leader loss detection & re-election < 1 s | L4: svc_mosaik_proto, L5: Cluster_Task | `firmware/core/mosaik_node.c` (election timeout) | TC-003 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Simulated time (452 ms); no hardware measurement |
@@ -67,14 +67,27 @@
 
 ---
 
-## 4. Evidence Classification Reference
+## 4. LOT 2B Specific Mapping (Stale/Replay Immunity)
+
+| ADD Ref | LOT 2B Feature | Implementation | Test | Evidence | Status | Limitation |
+|---------|----------------|----------------|------|----------|--------|------------|
+| REQ-FUNC-0001 | Term monotonicity enforcement | `mosaik_node.c`: check_heartbeat_stale, term check | TC-008, TC-012 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | Host sim; semantic rejection only |
+| REQ-FUNC-0001 | Duplicate sequence rejection | `mosaik_node.c`: last_hb_seq tracking | TC-011 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | No cryptographic anti-replay |
+| REQ-FUNC-0001 | Expired lease replay rejection | `mosaik_node.c`: lease_expiry_ms check in stale check | TC-009 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | Requires isolation to test expiry |
+| REQ-FUNC-0001 | Partition recovery safety | `mosaik_node.c`: stale authority check via last_hb_term | TC-010 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | Deterministic 2+1 partition |
+| REQ-FUNC-0001 | Stale vote request rejection | `mosaik_node.c`: term check in VOTE_REQ handler | TC-012 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | No vote replay protection beyond term |
+| — | INV-LEADER-UNIQUE under stale traffic | TC-008–TC-012 check valid_leader_count ≤ 1 | TC-008–TC-012 | LOT2B_STALE_REPLAY_REPORT.md | CbD (sim) | At instrumented observation points |
+
+---
+
+## 5. Evidence Classification Reference
 
 | Code | Definition | Current Max Claim |
 |------|------------|-------------------|
-| **CbD** | Compliant-by-Design (architectural enforcement) | LOT 2A: vote-per-term, quorum, lease step-down |
+| **CbD** | Compliant-by-Design (architectural enforcement) | LOT 2A: vote-per-term, quorum, lease step-down; LOT 2B: term monotonicity, duplicate rejection |
 | **CbA** | Compliant-by-Analysis (math/static analysis) | None yet |
 | **CbT** | Compliant-by-Test on **physical hardware** | **NONE** — no hardware tests |
-| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A |
+| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A, 2B |
 | **PARTIAL** | Partially implemented/evidenced | REQ-FUNC-0007 (CRC yes, correlation_id no) |
 | **DESIGN-ONLY** | Documented in architecture, not implemented | Most LOT 3+ requirements |
 | **NOT-STARTED** | No work begun | Many |
@@ -83,7 +96,7 @@
 
 ---
 
-## 5. Mapping Maintenance Rules
+## 6. Mapping Maintenance Rules
 
 1. Every new implementation must add/update a row in this table
 2. Status changes require evidence reference

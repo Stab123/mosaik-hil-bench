@@ -93,6 +93,41 @@ Test Result / Evidence
 | **Forward** | REQ-FUNC-0001 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto (lease) → `mosaik_node.c:lease_expiry_ms, mosaik_has_valid_leadership_authority()` + `test_mosaik.c:connectivity[][]` → TC-007 → PASS (maximum concurrent valid leadership authorities observed at the defined deterministic simulation observation points: 1) → IMPLEMENTED-SIM |
 | **Reverse** | TC-007 → `mosaik_node.c:106, 239-249, 270-276` + `test_mosaik.c:bus_set_partition_2plus1` → lease expiry + valid authority → REQ-FUN-001/002 → REQ-FUNC-0001 |
 
+### TC-008: Old Term Heartbeat Rejected
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:check_heartbeat_stale()` (term monotonicity) → TC-008 → PASS (stale heartbeat rejected, term maintained) → IMPLEMENTED-SIM |
+| **Reverse** | TC-008 → `mosaik_node.c:88-120` → term monotonicity check → REQ-FUN-001 → REQ-FUNC-0001 |
+
+### TC-009: Replay After Lease Expiry Rejected
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:check_heartbeat_stale()` (lease expiry check) → TC-009 → PASS (expired authority stays expired) → IMPLEMENTED-SIM |
+| **Reverse** | TC-009 → `mosaik_node.c:88-120, 321-322` → lease expiry check + step-down → REQ-FUN-001 → REQ-FUNC-0001 |
+
+### TC-010: Delayed Old Leader After Partition Recovery Rejected
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto → `mosaik_node.c:check_heartbeat_stale()` (stale authority via last_hb_term) + `test_mosaik.c:partition/heal` → TC-010 → PASS (newer term remains authoritative) → IMPLEMENTED-SIM |
+| **Reverse** | TC-010 → `mosaik_node.c:88-120, 109-116` → stale authority check via last_hb_term → REQ-FUN-001/002 → REQ-FUNC-0001 |
+
+### TC-011: Duplicate Heartbeat Idempotence
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:check_heartbeat_stale()` (duplicate seq check via last_hb_seq) → TC-011 → PASS (duplicate delivery idempotent) → IMPLEMENTED-SIM |
+| **Reverse** | TC-011 → `mosaik_node.c:88-120, 105-108` → duplicate sequence check → REQ-FUN-001 → REQ-FUNC-0001 |
+
+### TC-012: Stale Election/Vote Traffic Rejected
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:VOTE_REQ handler` (term monotonicity) → TC-012 → PASS (stale vote request rejected) → IMPLEMENTED-SIM |
+| **Reverse** | TC-012 → `mosaik_node.c:269-272` → term check in VOTE_REQ → REQ-FUN-001 → REQ-FUNC-0001 |
+
 ---
 
 ## 3. Bidirectional Matrix Summary
@@ -106,6 +141,11 @@ Test Result / Evidence
 | TC-005 | REQ-FUNC-0002, REQ-SAFE-0003 | REQ-FUN-002, REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:candidate_failures` | PASS | IMPLEMENTED-SIM |
 | TC-006 | REQ-FUNC-0007 | REQ-ICD-002 | svc_mosaik_proto | `mosaik_proto.c:crc8, encode/decode` | PASS | PARTIAL |
 | TC-007 | REQ-FUNC-0001 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:lease` + `test_mosaik.c:partition` | PASS (max concurrent valid authorities observed at simulation points: 1) | IMPLEMENTED-SIM |
+| TC-008 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` | PASS | IMPLEMENTED-SIM |
+| TC-009 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` + lease check | PASS | IMPLEMENTED-SIM |
+| TC-010 | REQ-FUNC-0001 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` + partition | PASS | IMPLEMENTED-SIM |
+| TC-011 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` | PASS | IMPLEMENTED-SIM |
+| TC-012 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:VOTE_REQ handler` | PASS | IMPLEMENTED-SIM |
 
 ---
 
@@ -120,8 +160,13 @@ Test Result / Evidence
 | TC-005 | F-03 (no quorum SAFE) | PROVISIONAL | 3-node subset |
 | TC-006 | I-01 (codec/CRC) | PROVISIONAL | Correlation_id gap |
 | TC-007 | F-04 (partition lease) | PROVISIONAL | LOT 2A specific; PARTIAL evidence for ADD R-04 — exercises one deterministic 3-node 2+1 partition scenario |
+| TC-008 | R-01 (stale term rejection) | PROVISIONAL | LOT 2B specific; semantic rejection only |
+| TC-009 | R-02 (expired lease replay) | PROVISIONAL | LOT 2B specific; requires isolation |
+| TC-010 | R-03 (partition recovery safety) | PROVISIONAL | LOT 2B specific; 2+1 partition |
+| TC-011 | R-04 (duplicate idempotence) | PROVISIONAL | LOT 2B specific; no crypto anti-replay |
+| TC-012 | R-05 (stale election rejection) | PROVISIONAL | LOT 2B specific; term monotonicity |
 
-**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior.
+**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay.
 
 ---
 

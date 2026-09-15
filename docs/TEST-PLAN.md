@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.2 — 14 September 2026
+**Issue:** 0.3 — 15 September 2026
 
 ## 1. Two levels of verification
 
@@ -28,6 +28,11 @@ the traces are committed under `results/`.
 | TC-005 | Isolated node cannot self-appoint, latches SAFE | REQ-003 | pass |
 | TC-006 | Frame codec round-trip, corrupted frames rejected | — | pass |
 | TC-007 | 2+1 partition: lease expiry enforces unique valid leader | REQ-002, Lot 2A | pass |
+| TC-008 | Old term heartbeat rejected | REQ-002, Lot 2B | pass |
+| TC-009 | Replay after lease expiry rejected | REQ-002, Lot 2B | pass |
+| TC-010 | Delayed old leader after partition recovery rejected | REQ-002, Lot 2B | pass |
+| TC-011 | Duplicate heartbeat idempotence | REQ-002, Lot 2B | pass |
+| TC-012 | Stale election/vote traffic rejected | REQ-002, Lot 2B | pass |
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.
@@ -76,4 +81,9 @@ reported, not discarded.
 - **Leadership lease (500 ms) is a host-model parameter; it does not validate
   physical CAN-FD timing. TC-007 uses a simulated pairwise connectivity model
   for the 2+1 partition; no hardware network partition is tested.**
+- **Stale/replay immunity (Lot 2B) uses semantic rejection based on term
+  monotonicity, lease validity, and sender state. No cryptographic anti-replay
+  or sequence-number protection is implemented; the current 8-byte frame
+  format has no room for correlation_id. TC-008–TC-012 test deterministic
+  scenarios only; no randomized network fault injection (reserved for LOT 2C).**
 - **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**

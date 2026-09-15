@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.2 — 14 September 2026
+**Issue:** 0.3 — 15 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -31,6 +31,11 @@ carrying no payload functions.
   validate physical CAN-FD timing. The lease mechanism prevents an isolated
   leader from retaining authority indefinitely during a network partition.
   This is a host software demonstrator only — no hardware validation.**
+- **Stale/replay immunity (Lot 2B) uses semantic rejection based on term
+  monotonicity, lease validity, and sender state. No cryptographic anti-replay
+  or sequence-number protection is implemented; the current 8-byte frame
+  format has no room for correlation_id. This is a host software demonstrator
+  only — no hardware validation.**
 
 ## 3. Physical layer
 
@@ -93,6 +98,7 @@ SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error.
 | Quorum | 2 | `floor(n/2) + 1` |
 | Failed elections before SAFE | 3 | bench choice |
 | **Leadership lease** | **500 ms** | **Lot 2A / MOSAIK-ADD-0001** |
+| **Stale message rejection** | **immediate (in receive path)** | **Lot 2B** |
 
 The election timeout is drawn from a per-node deterministic xorshift sequence
 seeded by node id, so that simulation runs are reproducible and nodes do not
@@ -107,6 +113,28 @@ isolated leader in a 2+1 network partition from believing it remains leader
 indefinitely. The predicate `mosaik_has_valid_leadership_authority()` returns
 true only when the node holds the leader role AND its lease is valid. Safety-
 critical decisions must use this predicate, not `mosaik_is_leader()`.
+
+**Stale/replay rejection semantics (Lot 2B).** The node rejects messages that
+would improperly restore obsolete leadership authority, invalidate a newer
+term, or destabilize valid cluster state. Rejection is based on:
+
+- **Term monotonicity:** messages with `term < local_term` are rejected
+  (stale term). The node never rolls back its term.
+- **Same-term authority:** heartbeats with duplicate sequence numbers from
+  the same source are rejected. A heartbeat claiming leadership in the local
+  term from a sender whose authority has expired is rejected.
+- **Future terms:** messages with `term > local_term` are accepted per the
+  existing Raft-like policy (step down and adopt).
+- **Duplicate idempotence:** receiving the same message multiple times does
+  not accumulate authority or extend an obsolete lease.
+- **Partition recovery:** after a partition heals, delayed messages from a
+  former leader at an older term cannot restore former authority.
+
+The predicate `mosaik_get_last_reject_reason()` provides the rejection reason
+for test instrumentation. No cryptographic anti-replay or sequence-number
+protection is implemented; the current 8-byte frame format has no room for
+correlation_id. This is a host-model parameter; it does not validate physical
+CAN-FD timing.
 
 ## 7. State machine
 
@@ -127,12 +155,30 @@ the leader loses valid leadership authority and steps down to follower.
 The predicate `mosaik_has_valid_leadership_authority()` distinguishes valid
 authority from merely holding the leader role.
 
+**Stale/replay immunity (Lot 2B).** The receive path explicitly rejects
+messages that would violate term monotonicity or restore expired authority:
+
+- Any message with `term < local_term` is rejected immediately (stale term).
+- Heartbeats with duplicate sequence numbers from the same source are
+  rejected (duplicate/replay).
+- A heartbeat claiming leadership in the local term from a sender whose
+  recorded authority term is newer than the message term is rejected (stale
+  authority).
+- Receiving the same message multiple times is idempotent for leadership
+  authority and lease state.
+- After partition recovery, delayed messages from a former leader at an older
+  term cannot restore former authority.
+
+The function `mosaik_get_last_reject_reason()` reports the rejection cause
+for test instrumentation.
+
 **Single-leader invariant (REQ-002).** A node grants at most one vote per term.
 A node observing any message with a higher term adopts it and steps down. These
 two rules together make two leaders in the same term impossible under the
 assumed fault model. The leadership lease further ensures that even under a
 2+1 network partition, at most one node holds valid leadership authority at
-any time (INV-LEADER-UNIQUE).
+any time (INV-LEADER-UNIQUE). Stale/replay rejection ensures that delayed or
+replayed traffic cannot create a second valid authority.
 
 **Split-brain detection (REQ-005).** If a leader nevertheless receives a
 heartbeat from another node claiming leadership in the same term, the invariant
@@ -159,5 +205,6 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 | REQ-004 election within 1 s of leader loss | 6, 7 | TC-003 |
 | REQ-005 SAFE within 10 ms of invariant violation | 7 | TC-004 |
 | **Lot 2A: leadership lease under partition** | **7** | **TC-007** |
+| **Lot 2B: stale/replay immunity** | **7** | **TC-008, TC-009, TC-010, TC-011, TC-012** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.

@@ -13,6 +13,7 @@
 
 #define N_NODES 3
 #define QUEUE_LEN 64
+#define MAX_DELAYED_MSGS 32
 
 typedef struct {
     mosaik_node_t  node[N_NODES];
@@ -22,6 +23,15 @@ typedef struct {
     uint8_t        queue_src[QUEUE_LEN];
     int            queued;
     uint32_t       now_ms;
+
+    /* Lot 2B: Adversarial message scheduling for delayed/duplicate/replay tests. */
+    struct {
+        mosaik_frame_t frame;
+        uint8_t        src;
+        uint32_t       deliver_at_ms;
+        bool           active;
+    } delayed_msgs[MAX_DELAYED_MSGS];
+    int delayed_count;
 } bus_t;
 
 static bus_t g_bus;
@@ -33,6 +43,32 @@ static void bus_tx(const mosaik_frame_t *frame, void *user)
     g_bus.queue[g_bus.queued] = *frame;
     g_bus.queue_src[g_bus.queued] = (uint8_t)src;
     g_bus.queued++;
+}
+
+/* Lot 2B: Inject a message immediately (bypassing TX callback). */
+static void bus_inject_frame(const mosaik_frame_t *frame, uint8_t src)
+{
+    if (g_bus.queued >= QUEUE_LEN) { return; }
+    g_bus.queue[g_bus.queued] = *frame;
+    g_bus.queue_src[g_bus.queued] = src;
+    g_bus.queued++;
+}
+
+/* Lot 2B: Process any delayed messages that are due for delivery. */
+static void bus_process_delayed(void)
+{
+    for (int i = 0; i < g_bus.delayed_count; i++) {
+        if (!g_bus.delayed_msgs[i].active) { continue; }
+        if (g_bus.now_ms >= g_bus.delayed_msgs[i].deliver_at_ms) {
+            /* Deliver now */
+            if (g_bus.queued < QUEUE_LEN) {
+                g_bus.queue[g_bus.queued] = g_bus.delayed_msgs[i].frame;
+                g_bus.queue_src[g_bus.queued] = g_bus.delayed_msgs[i].src;
+                g_bus.queued++;
+            }
+            g_bus.delayed_msgs[i].active = false;
+        }
+    }
 }
 
 /* Set full connectivity (all nodes can talk to all other nodes). */
@@ -87,6 +123,9 @@ static void bus_step(void)
     uint8_t pending_src[QUEUE_LEN];
     int n, i, j;
     bool leader_hb_delivered[N_NODES] = {false};
+
+    /* Lot 2B: Process any delayed messages that are now due. */
+    bus_process_delayed();
 
     n = g_bus.queued;
     memcpy(pending, g_bus.queue, sizeof(mosaik_frame_t) * (size_t)n);
@@ -430,6 +469,343 @@ static void tc_007_partition_lease_expiry(void)
     printf("        maximum concurrent valid leaders = %d\n", max_concurrent_valid);
 }
 
+/* ===== LOT 2B: Stale/Replay Immunity Tests ===== */
+
+/* TC-008: Old term heartbeat rejected.
+ * Scenario: establish leader at term N, advance to term N+1,
+ * inject delayed heartbeat from old leader carrying term N. */
+static void tc_008_old_term_heartbeat_rejected(void)
+{
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+    int old_leader_idx, new_leader_idx;
+    uint16_t old_term, new_term;
+    uint32_t k;
+
+    printf("TC-008  old term heartbeat rejected [Lot 2B]\n");
+
+    bus_init();
+    bus_run(2000u); /* term N */
+
+    old_leader_idx = leader_index();
+    old_term = g_bus.node[old_leader_idx].term;
+    check(old_leader_idx >= 0, "Lot 2B", "leader existed at term N");
+    if (old_leader_idx < 0) { return; }
+
+    /* Capture an old heartbeat from the leader at term N. */
+    msg.type = MOSAIK_MSG_HEARTBEAT;
+    msg.src  = (uint8_t)(old_leader_idx + 1);
+    msg.version = MOSAIK_PROTO_VERSION;
+    msg.role = MOSAIK_ROLE_LEADER;
+    msg.state = MOSAIK_STATE_NOMINAL;
+    msg.term = old_term;
+    msg.arg  = g_bus.node[old_leader_idx].seq; /* current seq */
+    mosaik_encode(&frame, &msg);
+
+    /* Kill old leader and force election to term N+1. */
+    g_bus.powered[old_leader_idx] = false;
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (leader_count() == 1) { break; }
+    }
+
+    new_leader_idx = leader_index();
+    new_term = g_bus.node[new_leader_idx].term;
+    check(new_leader_idx >= 0, "Lot 2B", "new leader elected at term N+1");
+    check(new_term > old_term, "Lot 2B", "term advanced to N+1");
+    if (new_leader_idx < 0) { return; }
+
+    /* Revive old leader node (simulate delayed message arrival). */
+    g_bus.powered[old_leader_idx] = true;
+    bus_set_full_connectivity();
+
+    /* Inject the old heartbeat (term N) into the cluster now at term N+1. */
+    bus_inject_frame(&frame, msg.src);
+
+    /* Step a few times to process. */
+    for (k = 0; k < 100u; k++) { bus_step(); }
+
+    /* Verify: term never decreases, old leader not restored, valid authority unchanged. */
+    check(g_bus.node[new_leader_idx].term == new_term, "Lot 2B",
+          "term never decreased after stale heartbeat");
+    check(g_bus.node[old_leader_idx].term == new_term, "Lot 2B",
+          "old leader adopted newer term");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[new_leader_idx]), "Lot 2B",
+          "valid N+1 authority remains");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "no double valid leadership authority");
+
+    printf("        old_term = %u, new_term = %u\n", old_term, new_term);
+    printf("        stale heartbeat rejected, term maintained\n");
+}
+
+/* TC-009: Replay after lease expiry.
+ * Scenario: valid leader, isolate so lease expires, replay old heartbeat without fresh quorum. */
+static void tc_009_replay_after_lease_expiry(void)
+{
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+    int leader_idx;
+    uint8_t old_seq;
+    uint16_t term;
+    uint32_t expiry_ms, k;
+
+    printf("TC-009  replay after lease expiry [Lot 2B]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2B", "leader existed");
+    if (leader_idx < 0) { return; }
+
+    term = g_bus.node[leader_idx].term;
+    old_seq = g_bus.node[leader_idx].seq - 1; /* last sent seq */
+
+    /* Capture a valid heartbeat. */
+    msg.type = MOSAIK_MSG_HEARTBEAT;
+    msg.src  = (uint8_t)(leader_idx + 1);
+    msg.version = MOSAIK_PROTO_VERSION;
+    msg.role = MOSAIK_ROLE_LEADER;
+    msg.state = MOSAIK_STATE_NOMINAL;
+    msg.term = term;
+    msg.arg  = old_seq;
+    mosaik_encode(&frame, &msg);
+
+    /* Isolate the leader so its heartbeats don't reach quorum.
+     * This causes the lease to expire. */
+    for (int i = 0; i < N_NODES; i++) {
+        if (i != leader_idx) {
+            g_bus.connectivity[leader_idx][i] = false;
+            g_bus.connectivity[i][leader_idx] = false;
+        }
+    }
+
+    /* Wait for lease to expire (500 ms + margin). */
+    expiry_ms = g_bus.node[leader_idx].lease_expiry_ms + 100;
+    while (g_bus.now_ms < expiry_ms) { bus_step(); }
+
+    /* Verify lease expired and authority lost. */
+    check(!mosaik_has_valid_leadership_authority(&g_bus.node[leader_idx]), "Lot 2B",
+          "lease expired, authority lost");
+    check(g_bus.node[leader_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2B",
+          "leader stepped down after lease expiry");
+
+    /* Restore connectivity. */
+    bus_set_full_connectivity();
+
+    /* Replay the old heartbeat without fresh quorum evidence. */
+    bus_inject_frame(&frame, msg.src);
+
+    for (k = 0; k < 100u; k++) { bus_step(); }
+
+    /* Verify: expired authority stays expired, replay does not renew lease. */
+    check(!mosaik_has_valid_leadership_authority(&g_bus.node[leader_idx]), "Lot 2B",
+          "expired leadership authority stays expired");
+    check(g_bus.node[leader_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2B",
+          "replay does not restore valid leadership");
+    check(valid_leader_count() <= 1, "INV-LEADER-UNIQUE",
+          "invariant satisfied");
+
+    printf("        lease expired at %u ms, replay at %u ms rejected\n",
+           expiry_ms - 100, g_bus.now_ms);
+}
+
+/* TC-010: Delayed old leader after partition recovery.
+ * Scenario: 2+1 partition, majority elects new leader, heal partition,
+ * deliver delayed traffic from old leader. */
+static void tc_010_delayed_old_leader_after_partition_heal(void)
+{
+    int leader_a_idx, leader_b_idx;
+    uint16_t term_a, term_b;
+    mosaik_msg_t msg;
+    mosaik_frame_t delayed_frames[10];
+    int delayed_count = 0;
+    uint32_t partition_time, heal_time, k;
+
+    printf("TC-010  delayed old leader after partition recovery [Lot 2B]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_a_idx = leader_index();
+    check(leader_a_idx >= 0, "Lot 2B", "initial leader A existed");
+    if (leader_a_idx < 0) { return; }
+    term_a = g_bus.node[leader_a_idx].term;
+
+    /* Capture some heartbeats from leader A before partition. */
+    for (int i = 0; i < 3; i++) {
+        bus_step();
+        if (g_bus.node[leader_a_idx].role == MOSAIK_ROLE_LEADER) {
+            msg.type = MOSAIK_MSG_HEARTBEAT;
+            msg.src  = (uint8_t)(leader_a_idx + 1);
+            msg.version = MOSAIK_PROTO_VERSION;
+            msg.role = MOSAIK_ROLE_LEADER;
+            msg.state = MOSAIK_STATE_NOMINAL;
+            msg.term = term_a;
+            msg.arg  = g_bus.node[leader_a_idx].seq;
+            mosaik_encode(&delayed_frames[delayed_count], &msg);
+            delayed_count++;
+        }
+    }
+
+    /* Create 2+1 partition isolating leader A. */
+    partition_time = g_bus.now_ms;
+    bus_set_partition_2plus1((uint8_t)(leader_a_idx + 1));
+
+    /* Majority side elects new leader B at newer term. */
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (valid_leader_count() == 1 && valid_leader_index() != leader_a_idx) {
+            break;
+        }
+    }
+
+    leader_b_idx = valid_leader_index();
+    check(leader_b_idx >= 0, "Lot 2B", "new leader B elected in majority");
+    if (leader_b_idx < 0) { return; }
+    term_b = g_bus.node[leader_b_idx].term;
+    check(term_b > term_a, "Lot 2B", "term advanced in majority partition");
+
+    /* Heal partition. */
+    heal_time = g_bus.now_ms;
+    bus_set_full_connectivity();
+
+    /* Deliver delayed frames from old leader A. */
+    for (int i = 0; i < delayed_count; i++) {
+        bus_inject_frame(&delayed_frames[i], delayed_frames[i].data[1]);
+    }
+
+    /* Allow convergence. */
+    for (k = 0; k < 1000u; k++) { bus_step(); }
+
+    /* Verify: newer term remains authoritative, A cannot regain authority. */
+    check(g_bus.node[leader_b_idx].term == term_b, "Lot 2B",
+          "newer term remains authoritative");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[leader_b_idx]), "Lot 2B",
+          "new leader B retains valid authority");
+    check(g_bus.node[leader_a_idx].term == term_b, "Lot 2B",
+          "old leader A adopted newer term");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "cluster converges to one valid authority");
+
+    printf("        partition_time = %u ms, heal_time = %u ms\n", partition_time, heal_time);
+    printf("        term_a = %u, term_b = %u, delayed_frames = %d\n", term_a, term_b, delayed_count);
+}
+
+/* TC-011: Duplicate heartbeat idempotence.
+ * Scenario: deliver one valid heartbeat repeatedly without new quorum evidence. */
+static void tc_011_duplicate_heartbeat_idempotence(void)
+{
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+    int leader_idx;
+
+    printf("TC-011  duplicate heartbeat idempotence [Lot 2B]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2B", "leader existed");
+    if (leader_idx < 0) { return; }
+
+    /* Capture a valid heartbeat. */
+    msg.type = MOSAIK_MSG_HEARTBEAT;
+    msg.src  = (uint8_t)(leader_idx + 1);
+    msg.version = MOSAIK_PROTO_VERSION;
+    msg.role = MOSAIK_ROLE_LEADER;
+    msg.state = MOSAIK_STATE_NOMINAL;
+    msg.term = g_bus.node[leader_idx].term;
+    msg.arg  = g_bus.node[leader_idx].seq;
+    mosaik_encode(&frame, &msg);
+
+    int initial_valid_count = valid_leader_count();
+    check(initial_valid_count == 1, "Lot 2B", "one valid leader initially");
+
+    /* Deliver the same heartbeat 10 times in a row (duplicate burst). */
+    for (int i = 0; i < 10; i++) {
+        bus_inject_frame(&frame, msg.src);
+        bus_step();
+    }
+
+    /* Verify: no additional authority, no additional leaders, no term regression. */
+    check(valid_leader_count() == 1, "Lot 2B",
+          "duplicate delivery does not create additional authority");
+    check(leader_count() == 1, "Lot 2B",
+          "duplicate delivery does not create additional leaders");
+    check(g_bus.node[leader_idx].term == msg.term, "Lot 2B",
+          "duplicate delivery does not cause term regression");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[leader_idx]), "Lot 2B",
+          "valid authority unchanged");
+
+    printf("        duplicate heartbeat delivered 10x, authority unchanged\n");
+}
+
+/* TC-012: Stale election/vote traffic.
+ * Scenario: establish newer term, inject old election/vote traffic. */
+static void tc_012_stale_election_traffic(void)
+{
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+    int leader_idx;
+    uint16_t old_term, new_term;
+    uint32_t k;
+
+    printf("TC-012  stale election/vote traffic rejected [Lot 2B]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2B", "initial leader existed");
+    if (leader_idx < 0) { return; }
+    old_term = g_bus.node[leader_idx].term;
+
+    /* Capture an old vote request. */
+    msg.type = MOSAIK_MSG_VOTE_REQ;
+    msg.src  = (uint8_t)(leader_idx + 1);
+    msg.version = MOSAIK_PROTO_VERSION;
+    msg.role = MOSAIK_ROLE_CANDIDATE;
+    msg.state = MOSAIK_STATE_NOMINAL;
+    msg.term = old_term;
+    msg.arg  = 0u;
+    mosaik_encode(&frame, &msg);
+
+    /* Kill leader, force new election at newer term. */
+    g_bus.powered[leader_idx] = false;
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (leader_count() == 1) { break; }
+    }
+
+    int new_leader_idx = leader_index();
+    check(new_leader_idx >= 0, "Lot 2B", "new leader elected");
+    if (new_leader_idx < 0) { return; }
+    new_term = g_bus.node[new_leader_idx].term;
+    check(new_term > old_term, "Lot 2B", "term advanced");
+
+    /* Revive old node and inject stale vote request. */
+    g_bus.powered[leader_idx] = true;
+    bus_set_full_connectivity();
+    bus_inject_frame(&frame, msg.src);
+
+    for (k = 0; k < 100u; k++) { bus_step(); }
+
+    /* Verify: no term rollback, no leader rollback, no stale vote alters quorum. */
+    check(g_bus.node[new_leader_idx].term == new_term, "Lot 2B",
+          "no term rollback from stale vote request");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[new_leader_idx]), "Lot 2B",
+          "valid leader retains authority");
+    check(g_bus.node[leader_idx].term == new_term, "Lot 2B",
+          "old node adopted newer term");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "no stale vote altered quorum result");
+
+    printf("        old_term = %u, new_term = %u\n", old_term, new_term);
+    printf("        stale vote request rejected\n");
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -441,6 +817,11 @@ int main(void)
     tc_005_no_quorum();
     tc_006_codec();
     tc_007_partition_lease_expiry();
+    tc_008_old_term_heartbeat_rejected();
+    tc_009_replay_after_lease_expiry();
+    tc_010_delayed_old_leader_after_partition_heal();
+    tc_011_duplicate_heartbeat_idempotence();
+    tc_012_stale_election_traffic();
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;

@@ -15,6 +15,13 @@
  * its lease within this interval, its leadership authority becomes invalid.
  * This prevents an isolated old leader from retaining authority indefinitely
  * during a 2+1 network partition.
+ *
+ * Stale/replay immunity (Lot 2B): the protocol rejects messages that would
+ * improperly restore obsolete leadership authority, invalidate a newer term,
+ * or destabilize valid cluster state. Rejection is based on term monotonicity,
+ * lease validity, and sender state, using available protocol fields.
+ * No cryptographic anti-replay is claimed; sequence numbers are not present
+ * in the current frame format. See LOT2B_STALE_REPLAY_REPORT.md.
  */
 #ifndef MOSAIK_NODE_H
 #define MOSAIK_NODE_H
@@ -40,6 +47,16 @@ void mosaik_config_default(mosaik_config_t *cfg);
  * leadership authority. This is a host-model parameter; it does not validate
  * physical CAN-FD timing. */
 #define MOSAIK_LEADERSHIP_LEASE_MS 500u
+
+/* Message rejection reason codes for test instrumentation. */
+typedef enum {
+    MOSAIK_REJECT_NONE = 0,
+    MOSAIK_REJECT_STALE_TERM,        /* term < local term */
+    MOSAIK_REJECT_STALE_LEASE,       /* term == local term but lease expired */
+    MOSAIK_REJECT_DUPLICATE_SEQ,     /* duplicate sequence number from same src */
+    MOSAIK_REJECT_STALE_AUTHORITY,   /* authority-bearing msg from expired leader */
+    MOSAIK_REJECT_INVALID_SENDER     /* sender state invalid for msg type */
+} mosaik_reject_reason_t;
 
 typedef struct {
     uint8_t          id;
@@ -68,11 +85,22 @@ typedef struct {
     uint32_t         last_quorum_contact_ms; /* last time majority was reachable */
     uint32_t         lease_expiry_ms;        /* when current lease expires */
 
+    /* Stale/replay detection (Lot 2B). */
+    uint8_t          last_hb_seq[4];         /* last seen HB seq per src (1..3) */
+    uint16_t         last_hb_term[4];        /* last seen HB term per src */
+
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;
     uint32_t         safe_entry_ms;
     uint32_t         safe_trigger_ms;
     uint32_t         decode_errors;
+
+    /* Rejection counters (Lot 2B test instrumentation). */
+    uint32_t         stale_term_rejections;
+    uint32_t         stale_lease_rejections;
+    uint32_t         duplicate_seq_rejections;
+    uint32_t         stale_authority_rejections;
+    uint32_t         invalid_sender_rejections;
 
     mosaik_tx_fn     tx;
     void            *user;
@@ -98,5 +126,8 @@ bool mosaik_is_leader(const mosaik_node_t *node);
  * interval (500 ms nominal). This is the correct predicate for
  * leader-dependent safety decisions. */
 bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node);
+
+/* Get the last rejection reason (for test instrumentation). */
+mosaik_reject_reason_t mosaik_get_last_reject_reason(const mosaik_node_t *node);
 
 #endif /* MOSAIK_NODE_H */

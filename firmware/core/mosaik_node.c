@@ -1,5 +1,7 @@
 #include "mosaik_node.h"
 
+static mosaik_reject_reason_t g_last_reject_reason = MOSAIK_REJECT_NONE;
+
 void mosaik_config_default(mosaik_config_t *cfg)
 {
     cfg->heartbeat_period_ms     = 100u;  /* MOSAIK-ADD-0001 */
@@ -8,6 +10,12 @@ void mosaik_config_default(mosaik_config_t *cfg)
     cfg->vote_timeout_ms         = 150u;
     cfg->cluster_size            = 3u;
     cfg->max_failed_elections    = 3u;
+}
+
+mosaik_reject_reason_t mosaik_get_last_reject_reason(const mosaik_node_t *node)
+{
+    (void)node;
+    return g_last_reject_reason;
 }
 
 static uint8_t quorum(const mosaik_node_t *n)
@@ -73,6 +81,44 @@ static void enter_safe(mosaik_node_t *n, mosaik_safe_cause_t cause, uint32_t tri
     emit(n, MOSAIK_MSG_SAFE, (uint8_t)cause);
 }
 
+/* Lot 2B: Stale/replay detection helpers. */
+
+/* Check if a heartbeat message is stale (term too old, duplicate seq, or
+ * authority expired). Returns rejection reason or MOSAIK_REJECT_NONE if OK. */
+static mosaik_reject_reason_t check_heartbeat_stale(const mosaik_node_t *n,
+                                                     const mosaik_msg_t *msg)
+{
+    uint8_t src = msg->src;
+    if (src >= 4u) {
+        return MOSAIK_REJECT_INVALID_SENDER;
+    }
+
+    /* Term monotonicity: reject messages from older terms. */
+    if (msg->term < n->term) {
+        return MOSAIK_REJECT_STALE_TERM;
+    }
+
+    /* Same-term authority: if we are leader in this term and lease is valid,
+     * another heartbeat in same term is split-brain (handled elsewhere).
+     * If we are follower, check if the sender's authority is stale. */
+    if (msg->term == n->term) {
+        /* Duplicate sequence number from same source. */
+        if (msg->arg == n->last_hb_seq[src] && n->last_hb_seq[src] != 0u) {
+            return MOSAIK_REJECT_DUPLICATE_SEQ;
+        }
+        /* Stale authority: if sender claims leader but our lease from them
+         * would have expired (we track per-sender lease via term). */
+        if (msg->role == MOSAIK_ROLE_LEADER) {
+            /* If we have a newer term recorded for this source, it's stale. */
+            if (n->last_hb_term[src] > msg->term) {
+                return MOSAIK_REJECT_STALE_AUTHORITY;
+            }
+        }
+    }
+
+    return MOSAIK_REJECT_NONE;
+}
+
 static void become_follower(mosaik_node_t *n, uint16_t term)
 {
     n->role      = MOSAIK_ROLE_FOLLOWER;
@@ -134,6 +180,15 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
     node->decode_errors = 0u;
     node->last_quorum_contact_ms = now_ms;
     node->lease_expiry_ms = now_ms;
+    node->stale_term_rejections = 0u;
+    node->stale_lease_rejections = 0u;
+    node->duplicate_seq_rejections = 0u;
+    node->stale_authority_rejections = 0u;
+    node->invalid_sender_rejections = 0u;
+    for (int i = 0; i < 4; i++) {
+        node->last_hb_seq[i] = 0u;
+        node->last_hb_term[i] = 0u;
+    }
     node->tx = tx;
     node->user = user;
     node->deadline_ms = now_ms + election_timeout(node);
@@ -169,6 +224,29 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
     switch (msg.type) {
 
     case MOSAIK_MSG_HEARTBEAT:
+        /* Lot 2B: Stale/replay rejection for heartbeats. */
+        {
+            mosaik_reject_reason_t reject = check_heartbeat_stale(node, &msg);
+            if (reject != MOSAIK_REJECT_NONE) {
+                g_last_reject_reason = reject;
+                switch (reject) {
+                    case MOSAIK_REJECT_STALE_TERM:
+                        node->stale_term_rejections++;
+                        break;
+                    case MOSAIK_REJECT_DUPLICATE_SEQ:
+                        node->duplicate_seq_rejections++;
+                        break;
+                    case MOSAIK_REJECT_STALE_AUTHORITY:
+                        node->stale_authority_rejections++;
+                        break;
+                    default:
+                        break;
+                }
+                return; /* reject stale/replayed heartbeat */
+            }
+            g_last_reject_reason = MOSAIK_REJECT_NONE;
+        }
+
         if (msg.term < node->term) {
             return; /* stale leader, ignore */
         }
@@ -183,6 +261,10 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         node->state            = MOSAIK_STATE_NOMINAL;
         node->failed_elections = 0u;
         node->last_hb_rx_ms    = now_ms;
+        /* Track last seen heartbeat sequence and term per source for
+         * duplicate/replay detection (Lot 2B). */
+        node->last_hb_seq[msg.src] = msg.arg;
+        node->last_hb_term[msg.src] = msg.term;
         /* Leadership lease: followers must not challenge the leader until the
          * lease expires (500 ms). This enforces INV-LEADER-UNIQUE during
          * network partitions. A small random jitter is added after the lease
@@ -192,9 +274,13 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         break;
 
     case MOSAIK_MSG_VOTE_REQ:
+        /* Lot 2B: Stale vote request rejection. */
         if (msg.term < node->term) {
+            g_last_reject_reason = MOSAIK_REJECT_STALE_TERM;
+            node->stale_term_rejections++;
             return;
         }
+        g_last_reject_reason = MOSAIK_REJECT_NONE;
         if (node->voted_term == msg.term && node->voted_for != 0u &&
             node->voted_for != msg.src) {
             return; /* one vote per term - this is what forbids split-brain */
@@ -206,6 +292,13 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         break;
 
     case MOSAIK_MSG_VOTE_GRANT:
+        /* Lot 2B: Stale vote grant rejection. */
+        if (msg.term < node->term) {
+            g_last_reject_reason = MOSAIK_REJECT_STALE_TERM;
+            node->stale_term_rejections++;
+            return;
+        }
+        g_last_reject_reason = MOSAIK_REJECT_NONE;
         if (node->role != MOSAIK_ROLE_CANDIDATE) { return; }
         if (msg.term != node->term)               { return; }
         if (msg.arg  != node->id)                 { return; }

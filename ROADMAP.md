@@ -22,7 +22,7 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 | **LOT 1** | Core Protocol Foundations | Wire protocol, frame format, CRC, identifiers, basic state machine | NOT STARTED |
 | **LOT 2** | Distributed Leadership and Authority | Leader election, quorum, lease, partitions, recovery | PARTIAL |
 | **LOT 2A** | Leader Lease / 2+1 Partition | 500 ms leadership lease, explicit valid authority, deterministic 2+1 partition test | **IMPLEMENTED (host sim)** |
-| **LOT 2B** | Stale/Delayed/Replayed Message Immunity | Message freshness, sequence numbers, replay protection | NOT STARTED |
+| **LOT 2B** | Stale/Delayed/Replayed Message Immunity | Message freshness, sequence numbers, replay protection | **IMPLEMENTED (host sim)** |
 | **LOT 2C** | Asymmetric Partitions, Loss, Delay, Reorder | Generalized fault injection framework | NOT STARTED |
 | **LOT 2D** | Crash/Restart/Recovery | Node restart, state recovery, persistent terms | NOT STARTED |
 | **LOT 3** | FDIR and SAFE | Fault detection, isolation, recovery, SAFE mode behavior | NOT STARTED |
@@ -92,15 +92,15 @@ All evidence in this repository uses these classifications:
 
 ---
 
-## 6. Current Baseline (LOT 2A)
+## 6. Current Baseline (LOT 2A + LOT 2B)
 
-**Verified commit:** `45ffca0193f365d0ab6eb772a4053482caef050d`  
-**Branch:** `lot2-distributed-safety-core`  
-**Tests:** 7 test cases (TC-001 through TC-007)  
-**Checks:** 22 checks, 0 failures  
+**Verified commit:** `806646a0a17803e70fff7bc65b6bf45eee43e6f2`  
+**Branch:** `lot2b-stale-replay-immunity`  
+**Tests:** 12 test cases (TC-001 through TC-012)  
+**Checks:** 55 checks, 0 failures  
 **Compiler:** `-std=c99 -Wall -Wextra -Werror` PASS  
 **Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS  
-**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; no physical CAN-FD validation; no HIL; no TRL 4.
+**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no physical CAN-FD validation; no HIL; no TRL 4.
 
 ---
 
