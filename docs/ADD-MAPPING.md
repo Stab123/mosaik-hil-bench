@@ -61,7 +61,7 @@
 |---------|----------------|----------------|------|----------|--------|------------|
 | REQ-FUNC-0001 | 500 ms leadership lease | `mosaik_node.c`: lease_expiry_ms, step-down on expiry | TC-007 | LOT2A_LEADER_LEASE_REPORT.md | IMPLEMENTED-SIM | Host sim; deterministic; 3-node 2+1 only |
 | REQ-FUNC-0001 | Valid authority predicate | `mosaik_node.h/c`: `mosaik_has_valid_leadership_authority()` | TC-007 | LOT2A_LEADER_LEASE_REPORT.md | IMPLEMENTED-SIM | Distinguishes ROLE_LEADER from authority |
-| REQ-FUNC-0002 | Lease renewal on quorum contact | `test_mosaik.c`: lease renewal on HB delivery | TC-007 | LOT2A_LEADER_LEASE_REPORT.md | IMPLEMENTED-SIM | Harness-mediated renewal |
+| REQ-FUNC-0002 | Lease renewal on quorum contact | `mosaik_node.c`: ACK handler records per-peer current-term evidence; `test_mosaik.c`: renewal only on an ACK actually received by the leader (commit `c6f600b`) | TC-007, TC-013, TC-019 | LOT2A_LEADER_LEASE_REPORT.md, LOT2D_CRASH_RECOVERY_REPORT.md §6 | IMPLEMENTED-SIM | Harness-mediated renewal bookkeeping from node-recorded evidence only; outbound heartbeat alone never renews |
 | REQ-FUNC-0004 | Follower election timeout aligned to lease | `mosaik_node.c`: deadline = HB + lease + jitter | TC-007 | LOT2A_LEADER_LEASE_REPORT.md | IMPLEMENTED-SIM | Prevents premature challenge |
 | — | INV-LEADER-UNIQUE invariant | TC-007 checks valid_leader_count ≤ 1 at every step | TC-007 | LOT2A_LEADER_LEASE_REPORT.md | CbD (sim) | Observed at simulation points only |
 
@@ -77,6 +77,19 @@
 | REQ-FUNC-0001 | Partition recovery safety | `mosaik_node.c`: stale authority check via last_hb_term | TC-010 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | Deterministic 2+1 partition |
 | REQ-FUNC-0001 | Stale vote request rejection | `mosaik_node.c`: term check in VOTE_REQ handler | TC-012 | LOT2B_STALE_REPLAY_REPORT.md | IMPLEMENTED-SIM | No vote replay protection beyond term |
 | — | INV-LEADER-UNIQUE under stale traffic | TC-008–TC-012 check valid_leader_count ≤ 1 | TC-008–TC-012 | LOT2B_STALE_REPLAY_REPORT.md | CbD (sim) | At instrumented observation points |
+
+---
+
+## 5. LOT 2C / LOT 2D Specific Mapping (Directional Faults, Crash/Restart, Retry Backoff)
+
+| ADD Ref | Feature | Implementation | Test | Evidence | Status | Limitation |
+|---------|---------|----------------|------|----------|--------|------------|
+| REQ-FUNC-0001 | Authority under directional faults | `test_mosaik.c`: per-path deliver/drop/delay/reorder model | TC-013–TC-020 | PROTOCOL.md §6–7, TEST-PLAN.md, TRACEABILITY.md §6 | IMPLEMENTED-SIM | Validated in the deterministic host demonstrator; no dedicated LOT 2C report (documentation limitation only) |
+| REQ-FUNC-0002 | Quorum evidence only from received ACK | `mosaik_node.c`: ACK handler; `test_mosaik.c`: `bus_step()` renewal on received ACK | TC-013, TC-019, TC-028 | LOT2D_CRASH_RECOVERY_REPORT.md §6 | IMPLEMENTED-SIM | Harness-mediated bookkeeping |
+| REQ-FUNC-0001 | Crash / cold restart | `test_mosaik.c`: `bus_crash_node()`, `bus_restart_node()` | TC-021–TC-027, TC-029, TC-030 | LOT2D_CRASH_RECOVERY_REPORT.md §3–4 | IMPLEMENTED-SIM | No term/vote persistence |
+| REQ-FUNC-0004 / REQ-PERF-0001 | Recovery from election collision | `mosaik_node.c`: candidate retry backoff in `mosaik_tick()`, `candidate_retry_backoff_span_ms` | TC-028, TC-031 | LOT2D_CRASH_RECOVERY_REPORT.md §8–10 | IMPLEMENTED-SIM | 628 ms / 680 ms in host model only; split vote remains possible |
+| REQ-SAFE-0003 | SAFE after genuine failed elections under persistent contention | unchanged `enter_safe()` path; TC-032 uses backoff span 1 | TC-032, TC-033 | LOT2D_CRASH_RECOVERY_REPORT.md §10–11 | IMPLEMENTED-SIM | Deterministic host model |
+| — | INV-LEADER-UNIQUE under crash, restart, collision, stale retry traffic | max valid authorities observed 1 | TC-021–TC-034 | LOT2D_CRASH_RECOVERY_REPORT.md §11 | CbD (sim) | At instrumented observation points |
 
 ---
 

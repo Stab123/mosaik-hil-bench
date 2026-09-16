@@ -1,5 +1,13 @@
 # LOT 2A Leader Lease Fix — Evidence Report
 
+> **Status note (16 September 2026).** Sections 4.4 and 5 describe lease
+> renewal "on heartbeat delivery to quorum". That harness behaviour was
+> superseded at commit `c6f600b`: the lease now renews only on an
+> acknowledgement actually received by the leader in its current term, and
+> outbound heartbeat delivery alone never renews it. See
+> `LOT2D_CRASH_RECOVERY_REPORT.md` section 6 and PROTOCOL.md issue 0.4.
+> The rest of this report is kept as the historical LOT 2A record.
+
 **Document:** LOT2A_LEADER_LEASE_REPORT.md
 **Date:** 14 September 2026
 **Author:** Implementation Engineer

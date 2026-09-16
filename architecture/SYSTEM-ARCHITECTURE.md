@@ -70,7 +70,7 @@
 |---------|------------|
 | **Leader** | Node holding `ROLE_LEADER` (elected by quorum) |
 | **Valid Leadership Authority** | Leader with active lease (500 ms) and quorum connectivity |
-| **Lease** | 500 ms nominal, renewed on heartbeat delivery to quorum |
+| **Lease** | 500 ms nominal, renewed only on acknowledgements actually received from a quorum of peers in the current term (Lot 2C, host model); outbound heartbeat delivery alone never renews |
 | **Quorum** | Majority of cluster (4 of 6 for full; 2 of 3 for bench subset) |
 | **Split-brain** | Two nodes claiming leadership in same term → immediate SAFE |
 

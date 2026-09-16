@@ -1,7 +1,7 @@
 # MOSAÏK Development Roadmap
 
 **Document:** MOSAIK-ROADMAP-001  
-**Issue:** 1.0 — 15 September 2026  
+**Issue:** 1.1 — 16 September 2026  
 **Parent:** MOSAIK-ADD-0001 (Issue 1 / Rev 1, dated 24 April 2026)
 
 ---
@@ -23,8 +23,8 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 | **LOT 2** | Distributed Leadership and Authority | Leader election, quorum, lease, partitions, recovery | PARTIAL |
 | **LOT 2A** | Leader Lease / 2+1 Partition | 500 ms leadership lease, explicit valid authority, deterministic 2+1 partition test | **IMPLEMENTED (host sim)** |
 | **LOT 2B** | Stale/Delayed/Replayed Message Immunity | Message freshness, sequence numbers, replay protection | **IMPLEMENTED (host sim)** |
-| **LOT 2C** | Asymmetric Partitions, Loss, Delay, Reorder | Generalized fault injection framework | NOT STARTED |
-| **LOT 2D** | Crash/Restart/Recovery | Node restart, state recovery, persistent terms | NOT STARTED |
+| **LOT 2C** | Asymmetric Partitions, Loss, Delay, Reorder | Directional fault model (deliver/drop/delay/reorder), ACK-based lease evidence, TC-013–TC-020 | **IMPLEMENTED (host sim)** — no dedicated report yet |
+| **LOT 2D** | Crash/Restart/Recovery | Crash and cold-restart models, candidate retry backoff after split vote, TC-021–TC-034 | **IMPLEMENTED (host sim)** — persistent terms NOT implemented (cold restart only) |
 | **LOT 3** | FDIR and SAFE | Fault detection, isolation, recovery, SAFE mode behavior | NOT STARTED |
 | **LOT 4** | MOSAÏK System Mode State Machine | INIT, NOMINAL, ADAPTIVE, DEGRADED, SAFE, PGA | NOT STARTED |
 | **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes | NOT STARTED |
@@ -92,15 +92,19 @@ All evidence in this repository uses these classifications:
 
 ---
 
-## 6. Current Baseline (LOT 2A + LOT 2B)
+## 6. Current Baseline (LOT 2A through LOT 2D)
 
-**Verified commit:** `806646a0a17803e70fff7bc65b6bf45eee43e6f2`  
-**Branch:** `lot2b-stale-replay-immunity`  
-**Tests:** 12 test cases (TC-001 through TC-012)  
-**Checks:** 55 checks, 0 failures  
-**Compiler:** `-std=c99 -Wall -Wextra -Werror` PASS  
-**Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS  
-**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no physical CAN-FD validation; no HIL; no TRL 4.
+**Verified commit:** `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea`  
+**Branch:** `lot2c-network-adversarial`  
+**Tests:** 34 test cases (TC-001 through TC-034)  
+**Checks:** 205 checks, 0 failures  
+**Compiler:** `-std=c99 -Wall -Wextra -Werror -O1` PASS  
+**Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS, 0 findings  
+**Invariants:** maximum concurrent valid authorities 1; term regressions 0  
+**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md`.  
+**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4.
+
+Previous baseline (LOT 2A + LOT 2B): commit `806646a0a17803e70fff7bc65b6bf45eee43e6f2`, branch `lot2b-stale-replay-immunity`, 12 test cases, 55 checks, 0 failures.
 
 ---
 

@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.3 — 15 September 2026
+**Issue:** 0.4 — 16 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -36,6 +36,16 @@ carrying no payload functions.
   or sequence-number protection is implemented; the current 8-byte frame
   format has no room for correlation_id. This is a host software demonstrator
   only — no hardware validation.**
+- **Leadership authority evidence (Lot 2C): a leader's lease is renewed only
+  from an ACK actually received from a peer in the current term. Outbound
+  heartbeat delivery alone never renews it. The renewal bookkeeping is
+  performed by the host bus model from the node's own recorded ACK evidence
+  and uses no topology or delivery knowledge.**
+- **Crash and restart (Lot 2D): a crash is the loss of all volatile state; a
+  restart is a cold initialisation with term 0 and no vote. No term or vote
+  persistence exists. Candidate retries after a failed election use a
+  randomised local backoff; a split vote remains possible, only its
+  indefinite persistence is addressed. Host software demonstrator only.**
 
 ## 3. Physical layer
 
@@ -60,7 +70,8 @@ the lowest range.
 | SAFE announce | `0x080 + node_id` | highest |
 | Vote request | `0x100 + node_id` | |
 | Vote grant | `0x180 + node_id` | |
-| Heartbeat | `0x200 + node_id` | lowest |
+| Heartbeat | `0x200 + node_id` | |
+| Acknowledgement (Lot 2C) | `0x300 + node_id` | lowest |
 
 `node_id` is 1..3. Identifier `0x080` itself is unused.
 
@@ -76,7 +87,7 @@ All messages use DLC 8.
 | 3 | State (0 INIT, 1 NOMINAL, 2 DEGRADED, 3 SAFE) |
 | 4 | Term, low byte |
 | 5 | Term, high byte |
-| 6 | Argument — heartbeat: sequence number; vote grant: target node id; SAFE: cause code |
+| 6 | Argument — heartbeat: sequence number; vote grant: target node id; SAFE: cause code; acknowledgement: echoed heartbeat sequence number |
 | 7 | CRC-8 over bytes 0..6 |
 
 CRC-8 is SAE-J1850: polynomial `0x1D`, initial value `0xFF`, final XOR `0xFF`.
@@ -99,15 +110,21 @@ SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error.
 | Failed elections before SAFE | 3 | bench choice |
 | **Leadership lease** | **500 ms** | **Lot 2A / MOSAIK-ADD-0001** |
 | **Stale message rejection** | **immediate (in receive path)** | **Lot 2B** |
+| **Lease evidence freshness** | **100 ms (received current-term ACK)** | **Lot 2C** |
+| **Candidate retry backoff** | **0–49 ms, randomised per node (span 50)** | **Lot 2D** |
 
-The election timeout is drawn from a per-node deterministic xorshift sequence
-seeded by node id, so that simulation runs are reproducible and nodes do not
-contend indefinitely.
+The election timeout and the candidate retry backoff are drawn from a
+per-node deterministic xorshift sequence seeded by node id, so that
+simulation runs are reproducible. Randomisation reduces contention; it does
+not make a simultaneous election impossible (Lot 2D).
 
 **Leadership lease semantics (Lot 2A).** A leader must maintain evidence of
 majority connectivity (quorum contact) to retain valid leadership authority.
-The lease is renewed each time the leader's heartbeat reaches a quorum of
-nodes. If a leader cannot renew its lease within 500 ms, its leadership
+The lease is renewed only when the leader actually receives an admissible
+current-term acknowledgement from a peer while fresh evidence (within 100 ms)
+from a quorum of peers exists; the leader itself is the implicit member of
+the quorum. Delivery of the leader's own heartbeat never renews the lease
+by itself (Lot 2C). If a leader cannot renew its lease within 500 ms, its leadership
 authority becomes invalid and it steps down to follower. This prevents an
 isolated leader in a 2+1 network partition from believing it remains leader
 indefinitely. The predicate `mosaik_has_valid_leadership_authority()` returns
@@ -145,13 +162,25 @@ and SAFE.
 candidate, votes for itself and broadcasts a vote request. On receiving grants
 from a quorum it becomes leader and immediately broadcasts a heartbeat. A
 candidate that does not reach quorum before the vote timeout increments its
-failure count and starts a new election; after three consecutive failures it
-latches SAFE with cause no-quorum.
+failure count; after three consecutive failures it latches SAFE with cause
+no-quorum. Otherwise it waits a randomised local retry backoff (Lot 2D,
+0–49 ms by default, drawn from its own RNG) before starting the next
+election. During that wait it holds the follower role, keeps its term and
+its vote for the failed term, and grants no second vote in that term. The
+wait is not a failed election. The backoff breaks the lock-step that
+otherwise makes a split vote between two candidates persist; it does not
+prevent the first collision.
+
+**Acknowledgement (Lot 2C).** A follower that accepts a heartbeat replies
+with an acknowledgement echoing the heartbeat sequence number. The leader
+records the acknowledgement per peer for its current term; this record is
+the only admissible quorum-contact evidence.
 
 **Leadership lease (Lot 2A).** Upon becoming leader, a node initializes a
-500 ms leadership lease. The lease is renewed each time the leader's heartbeat
-is delivered to a quorum of nodes (including itself). If the lease expires,
-the leader loses valid leadership authority and steps down to follower.
+500 ms leadership lease. The lease is renewed only on actually received
+current-term acknowledgements from a quorum of peers, the leader itself being
+the implicit member (Lot 2C). If the lease expires, the leader loses valid
+leadership authority and steps down to follower.
 The predicate `mosaik_has_valid_leadership_authority()` distinguishes valid
 authority from merely holding the leader role.
 
@@ -188,6 +217,11 @@ and announces the cause on the bus. It does not attempt to arbitrate.
 **Degraded operation.** A node that observes a peer in SAFE moves from NOMINAL
 to DEGRADED while continuing to operate.
 
+**Crash and restart (Lot 2D).** A crashed node transmits, receives and
+services nothing. A restarted node starts from term 0 with no vote and no
+knowledge of the cluster; it adopts the current term from the first
+higher-term message it receives and cannot regain former authority.
+
 ## 8. Assumed fault model
 
 Covered: loss of power of any single node, including the leader; loss of
@@ -202,9 +236,11 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 |---|---|---|
 | REQ-002 exactly one leader, split-brain prohibited | 7 | TC-001, TC-002, TC-004, TC-007 |
 | REQ-003 quorum-based reconfiguration | 6, 7 | TC-005 |
-| REQ-004 election within 1 s of leader loss | 6, 7 | TC-003 |
+| REQ-004 election within 1 s of leader loss | 6, 7 | TC-003, TC-022, TC-028, TC-031 (host model) |
 | REQ-005 SAFE within 10 ms of invariant violation | 7 | TC-004 |
 | **Lot 2A: leadership lease under partition** | **7** | **TC-007** |
 | **Lot 2B: stale/replay immunity** | **7** | **TC-008, TC-009, TC-010, TC-011, TC-012** |
+| **Lot 2C: directional faults and authority evidence** | **6, 7** | **TC-013 to TC-020** |
+| **Lot 2D: crash, restart, candidate retry backoff** | **7** | **TC-021 to TC-034** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.

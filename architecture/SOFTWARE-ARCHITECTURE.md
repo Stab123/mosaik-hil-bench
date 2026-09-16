@@ -134,7 +134,7 @@ L0 Startup ◄── Vector table, clock tree, bootloader
 1. **Clock model:** Replace simulated `now_ms` with `svc_time` (FreeRTOS tick + PTP offset)
 2. **CAN transport:** Replace virtual bus callback with `drv_canfd` Tx/Rx queues
 3. **Concurrency:** Protect `mosaik_node_t` with mutex or run in single `Cluster_Task`
-4. **Persistence:** Add `svc_fs` for term/vote persistence across reset (LOT 2D)
+4. **Persistence:** Add `svc_fs` for term/vote persistence across reset — NOT implemented. The LOT 2D host demonstrator restarts cold through `mosaik_init()` and loses all volatile term/vote state by design (see `LOT2D_CRASH_RECOVERY_REPORT.md` §3, §13); a target Lot for persistence is not yet assigned
 5. **Discretes:** Implement `Safety_Task` reading/wiring GPIO for SAFE_ASSERT, etc.
 6. **Memory:** Static allocation only; no heap after init (LOT 10 verification)
 7. **Determinism:** Preserve deterministic RNG for reproducible tests; add hardware entropy for flight

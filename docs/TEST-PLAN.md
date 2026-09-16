@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.3 — 15 September 2026
+**Issue:** 0.4 — 16 September 2026
 
 ## 1. Two levels of verification
 
@@ -33,6 +33,33 @@ the traces are committed under `results/`.
 | TC-010 | Delayed old leader after partition recovery rejected | REQ-002, Lot 2B | pass |
 | TC-011 | Duplicate heartbeat idempotence | REQ-002, Lot 2B | pass |
 | TC-012 | Stale election/vote traffic rejected | REQ-002, Lot 2B | pass |
+| TC-013 | One-way leader isolation: authority expires | REQ-002, Lot 2C | pass |
+| TC-014 | Asymmetric minority view | REQ-002, Lot 2C | pass |
+| TC-015 | Selective heartbeat loss | REQ-002, Lot 2C | pass |
+| TC-016 | Delay around lease boundary | REQ-002, Lot 2C | pass |
+| TC-017 | Message reordering, no state regression | REQ-002, Lot 2C | pass |
+| TC-018 | Partition heal with queued traffic | REQ-002, Lot 2C | pass |
+| TC-019 | Selective quorum contact failure | REQ-002, Lot 2C | pass |
+| TC-020 | Adversarial combination | REQ-002, Lot 2C | pass |
+| TC-021 | Follower crash while leader/quorum available | REQ-002, Lot 2D | pass |
+| TC-022 | Leader crash, new leader elected | REQ-004, Lot 2D | pass |
+| TC-023 | Leader crash, election, former leader restarts cold | REQ-002, Lot 2D | pass |
+| TC-024 | Crashed follower restart and rejoin | REQ-002, Lot 2D | pass |
+| TC-025 | Former leader restarts after another leader elected | REQ-002, Lot 2D | pass |
+| TC-026 | Restart with delayed pre-crash messages queued | REQ-002, Lot 2B, Lot 2D | pass |
+| TC-027 | Repeated crash/restart of one node | REQ-002, Lot 2D | pass |
+| TC-028 | Crash during/near lease expiry, new valid leader | REQ-004, Lot 2D | pass |
+| TC-029 | Crash during election (candidate), no duplicate vote | REQ-002, Lot 2D | pass |
+| TC-030 | Recovery under asymmetric network | REQ-002, Lot 2D | pass |
+| TC-031 | Natural election collision, randomized retry recovery | REQ-004, REQ-002, Lot 2D | pass |
+| TC-032 | Permanent retry contention keeps SAFE contract (backoff span 1) | REQ-003, Lot 2D | pass |
+| TC-033 | Asymmetric partition during retry, no authority without quorum | REQ-002, REQ-003, Lot 2D | pass |
+| TC-034 | Stale delayed election traffic during retry | REQ-002, Lot 2B, Lot 2D | pass |
+
+Current total at commit `f4e0f3c`: 205 checks, 0 failures, sanitizer clean.
+TC-031 was added RED at commit `d38985d` (6 failing checks) before the
+Lot 2D protocol correction and passes since `f4e0f3c`; see
+`LOT2D_CRASH_RECOVERY_REPORT.md`.
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.
@@ -86,4 +113,16 @@ reported, not discarded.
   or sequence-number protection is implemented; the current 8-byte frame
   format has no room for correlation_id. TC-008–TC-012 test deterministic
   scenarios only; no randomized network fault injection (reserved for LOT 2C).**
+- **Lot 2C uses a directional per-path network model (deliver, drop, delay,
+  reorder) on the virtual bus. Lease renewal is credited only from ACK frames
+  actually received by the leader in its current term; the bookkeeping is
+  performed by the harness from the node's own recorded evidence.**
+- **Lot 2D crash and restart are harness models: a crash silences the node
+  and a restart is a cold `mosaik_init()`. No persistence is implemented.
+  TC-031 to TC-034 create election collisions by crashing the leader at a
+  naturally occurring shared follower deadline found by read-only
+  observation; no protocol internal is written by any test. Recovery times
+  (TC-028: 628 ms, TC-031: 680 ms) are deterministic host-model values, not
+  a worst-case bound. A split vote remains possible; sub-millisecond bus
+  races are not modelled.**
 - **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**

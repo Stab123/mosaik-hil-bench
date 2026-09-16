@@ -24,12 +24,12 @@ The ADD contains at least two requirement naming schemes:
 
 ### 2.1 Functional Requirements (REQ-FUNC)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-FUNC-0001 | One and only one active leader outside a declared partition | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: TC-001, TC-002, TC-007 | "Outside declared partition" — see ADD-F002 |
 | REQ-FUNC-0002 | Major reconfiguration requires formal majority quorum | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: quorum=2 for 3-node | 3-node subset only; GSE voting role TBC — see ADD-F008 |
 | REQ-FUNC-0003 | Heartbeat nominal period 100 ms | CbT | IMPLEMENTED-SIM | LOT1: TC-006 (period), TC-001 | Host sim only; derived tolerance ±2% — see ADD-F010 |
-| REQ-FUNC-0004 | Leader loss detection and re-election < 1 s | CbT | IMPLEMENTED-SIM | LOT2A: TC-003 (452 ms sim) | Simulated time only |
+| REQ-FUNC-0004 | Leader loss detection and re-election < 1 s | CbT | IMPLEMENTED-SIM | LOT2A: TC-003 (452 ms sim); LOT2D: TC-028 (628 ms sim), TC-031 (680 ms sim, after one split vote) | Simulated time only; not a worst-case bound |
 | REQ-FUNC-0005 | Mission remains useful after loss of one EN in DEGRADED mode | CbA, CbT | DESIGN-ONLY | — | 6-node architecture required |
 | REQ-FUNC-0006 | Mode transitions and critical decisions must generate logged events | CbD, CbT | DESIGN-ONLY | — | Logger service LOT 7 |
 | REQ-FUNC-0007 | Critical CAN messages include CRC and correlation_id | CbD, CbT | PARTIAL | LOT1: TC-006 (CRC) | correlation_id not yet implemented — see ADD-F007 |
@@ -39,7 +39,7 @@ The ADD contains at least two requirement naming schemes:
 
 ### 2.2 Safety Requirements (REQ-SAFE)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-SAFE-0001 | No single point of failure shall cause loss of mission | CbA, CbT | DESIGN-ONLY | — | Architecture-level |
 | REQ-SAFE-0002 | Split-brain shall be detected and latched within 10 ms | CbT | IMPLEMENTED-SIM | LOT2A: TC-004 (0 ms sim) | Host sim detection path |
@@ -48,23 +48,23 @@ The ADD contains at least two requirement naming schemes:
 
 ### 2.3 Performance Requirements (REQ-PERF)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
-| REQ-PERF-0001 | Election completion < 1000 ms after leader loss | CbT | IMPLEMENTED-SIM | LOT2A: TC-003 | Simulated time |
+| REQ-PERF-0001 | Election completion < 1000 ms after leader loss | CbT | IMPLEMENTED-SIM | LOT2A: TC-003; LOT2D: TC-028, TC-031 | Simulated time; deterministic host model only |
 | REQ-PERF-0002 | SAFE latch latency < 10 ms from detection | CbT | IMPLEMENTED-SIM | LOT2A: TC-004 | Host receive path |
 | REQ-PERF-0003 | Heartbeat period 100 ms ± tolerance (derived: 10 Hz ±2%) | CbT | IMPLEMENTED-SIM | LOT1: TC-001 | Period configured; tolerance traceability — see ADD-F010 |
 | REQ-PERF-0004 | CAN-FD arbitration 500 kbit/s, data 2 Mbit/s | CbT | HARDWARE-REQUIRED | — | LOT 6 |
 
 ### 2.4 Environmental Requirements (REQ-ENV)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-ENV-0001 | Operation at LEO thermal/vibration/radiation | CbT | HARDWARE-REQUIRED | — | LOT 13–14; no environmental qualification — see ADD-F005 |
 | REQ-ENV-0002 | Commercial development board qualification | CbA | NOT-STARTED | — | Bench only |
 
 ### 2.5 Interface Requirements (REQ-IF)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-IF-0001 | CAN-FD primary backbone ICD | CbD, CbT | DESIGN-ONLY | — | LOT 6 |
 | REQ-IF-0002 | Ethernet secondary data network | CbD, CbT | NOT-STARTED | — | LOT 6 |
@@ -73,7 +73,7 @@ The ADD contains at least two requirement naming schemes:
 
 ### 2.6 Logging Requirements (REQ-LOG)
 
-| ID | Statement (normalized) | Verification Method | Impl Status | Evidence Status | Notes |
+| ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-LOG-0001 | All mode transitions logged with timestamp | CbD, CbT | DESIGN-ONLY | — | LOT 7 |
 | REQ-LOG-0002 | All critical decisions logged with correlation_id | CbD, CbT | DESIGN-ONLY | — | LOT 7; correlation_id not yet in wire format — see ADD-F007 |
@@ -101,11 +101,11 @@ The ADD contains at least two requirement naming schemes:
 
 ---
 
-## 4. Verification Method Legend
+## 4. Required Verification Method Legend
 
 - **CbD** = Compliant-by-Design (architectural enforcement, e.g., one vote per term)
 - **CbA** = Compliant-by-Analysis (mathematical proof, static analysis)
-- **CbT** = Compliant-by-Test on **physical hardware** (measured)
+- **CbT** = Compliant-by-Test on **physical hardware** (measured). As a *required* method it states what the requirement will need; it is not an achieved result. No CbT evidence exists in this repository (host simulation only).
 - **IMPLEMENTED-SIM** = Implemented and tested in host simulation only
 - **PARTIAL** = Partially implemented / partially evidenced
 - **DESIGN-ONLY** = Documented in architecture, not implemented

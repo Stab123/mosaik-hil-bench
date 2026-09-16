@@ -1,7 +1,7 @@
 # MOSAÏK Bidirectional Traceability
 
 **Document:** MOSAIK-TRACE-001  
-**Issue:** 1.1 — 15 September 2026  
+**Issue:** 1.2 — 16 September 2026  
 **Purpose:** Bidirectional traceability matrix linking ADD requirements ↔ derived requirements ↔ architecture ↔ implementation ↔ test ↔ result ↔ evidence
 
 ---
@@ -42,7 +42,7 @@ Test Result / Evidence
 
 ---
 
-## 2. Existing Test Cases Traceability (TC-001 through TC-007)
+## 2. Existing Test Cases Traceability (TC-001 through TC-012)
 
 ### TC-001: Single Leader Elected and Held
 
@@ -146,6 +146,28 @@ Test Result / Evidence
 | TC-010 | REQ-FUNC-0001 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` + partition | PASS | IMPLEMENTED-SIM |
 | TC-011 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:check_heartbeat_stale` | PASS | IMPLEMENTED-SIM |
 | TC-012 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:VOTE_REQ handler` | PASS | IMPLEMENTED-SIM |
+| TC-013 | REQ-FUNC-0001, REQ-FUNC-0002 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto (lease, ACK evidence) | `mosaik_node.c:368` + `test_mosaik.c:427-445` | PASS | IMPLEMENTED-SIM |
+| TC-014 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121, 223-225` | PASS | IMPLEMENTED-SIM |
+| TC-015 | REQ-FUNC-0001, REQ-FUNC-0002 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:276, 368` | PASS | IMPLEMENTED-SIM |
+| TC-016 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121, 368` | PASS (7 offsets) | IMPLEMENTED-SIM |
+| TC-017 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121` | PASS | IMPLEMENTED-SIM |
+| TC-018 | REQ-FUNC-0001, REQ-FUNC-0002 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121, 304-318` + partition | PASS | IMPLEMENTED-SIM |
+| TC-019 | REQ-FUNC-0002, REQ-FUNC-0001 | REQ-FUN-002, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto (ACK evidence) | `test_mosaik.c:196-221, 427-445` + `mosaik_node.c:368` | PASS | IMPLEMENTED-SIM |
+| TC-020 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121, 223-225, 287-291` | PASS | IMPLEMENTED-SIM |
+| TC-021 | REQ-FUNC-0001 (uniqueness); cold-restart property | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199, 223-225` + `test_mosaik.c:333, 345` | PASS | IMPLEMENTED-SIM |
+| TC-022 | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 | REQ-PERF-001, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:276, 133-158` | PASS | IMPLEMENTED-SIM |
+| TC-023 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199, 223-225, 89-121` | PASS | IMPLEMENTED-SIM |
+| TC-024 | REQ-FUNC-0001 (uniqueness); cold-restart property | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199` | PASS | IMPLEMENTED-SIM |
+| TC-025 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199, 223-225, 89-121` | PASS | IMPLEMENTED-SIM |
+| TC-026 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:89-121, 287-291` | PASS | IMPLEMENTED-SIM |
+| TC-027 | REQ-FUNC-0001 (uniqueness); cold-restart property | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199` | PASS (5 cycles) | IMPLEMENTED-SIM |
+| TC-028 | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 | REQ-PERF-001, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto (retry backoff) | `mosaik_node.c:276, 296, 384-405` | PASS (628 ms sim) | IMPLEMENTED-SIM |
+| TC-029 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:133-146, 160-199, 296` | PASS | IMPLEMENTED-SIM |
+| TC-030 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:160-199, 223-225` | PASS | IMPLEMENTED-SIM |
+| TC-031 | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 | REQ-PERF-001, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto (retry backoff) | `mosaik_node.c:384-405, 296, 304-318` | PASS (680 ms sim; RED at `d38985d`) | IMPLEMENTED-SIM |
+| TC-032 | REQ-FUNC-0002, REQ-SAFE-0003 | REQ-FUN-002, REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:384-387, 398-404` (span 1) | PASS (SAFE at 2980 ms) | IMPLEMENTED-SIM |
+| TC-033 | REQ-FUNC-0002, REQ-SAFE-0003, REQ-FUNC-0001 | REQ-FUN-002, REQ-SAF-002, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:304-318, 384-405` | PASS | IMPLEMENTED-SIM |
+| TC-034 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:287-291, 305-309, 384-405` | PASS | IMPLEMENTED-SIM |
 
 ---
 
@@ -165,8 +187,30 @@ Test Result / Evidence
 | TC-010 | R-03 (partition recovery safety) | PROVISIONAL | LOT 2B specific; 2+1 partition |
 | TC-011 | R-04 (duplicate idempotence) | PROVISIONAL | LOT 2B specific; no crypto anti-replay |
 | TC-012 | R-05 (stale election rejection) | PROVISIONAL | LOT 2B specific; term monotonicity |
+| TC-013 | F-04 (partition lease) | RELATED | LOT 2C; one-way isolation, ACK-evidence lease |
+| TC-014 | F-02 (split-brain absence) | RELATED | LOT 2C; asymmetric view |
+| TC-015 | F-04 (partition lease) | RELATED | LOT 2C; selective heartbeat loss |
+| TC-016 | R-02 (expired lease replay) | RELATED | LOT 2C; delay at lease boundary |
+| TC-017 | R-04 (duplicate idempotence) | RELATED | LOT 2C; reordering |
+| TC-018 | R-03 (partition recovery safety) | RELATED | LOT 2C; heal with queued traffic |
+| TC-019 | F-04 (partition lease) | RELATED | LOT 2C; quorum-contact loss |
+| TC-020 | F-02 (split-brain absence) | RELATED | LOT 2C; combined faults |
+| TC-021 | — | NONE | LOT 2D; crash/restart not in the current Section 82 transcription (ADD-F001); protocol-property evidence |
+| TC-022 | P-01 (failover latency), F-01 (leader election) | RELATED | LOT 2D; leader crash, sim time |
+| TC-023 | R-03 (partition recovery safety) | RELATED | LOT 2D; former leader cold restart |
+| TC-024 | — | NONE | LOT 2D; cold-restart vote reset; protocol-property evidence |
+| TC-025 | R-03 (partition recovery safety) | RELATED | LOT 2D; former leader after new election |
+| TC-026 | R-01 (stale term rejection) | RELATED | LOT 2D; delayed pre-crash frames |
+| TC-027 | — | NONE | LOT 2D; repeated cold restart; protocol-property evidence |
+| TC-028 | P-01 (failover latency) | RELATED | LOT 2D; 628 ms sim after crash near lease expiry; not a bound |
+| TC-029 | F-01 (leader election) | RELATED | LOT 2D; no duplicate vote after candidate cold restart |
+| TC-030 | F-02 (split-brain absence) | RELATED | LOT 2D; restart under asymmetric faults |
+| TC-031 | P-01 (failover latency) | RELATED | LOT 2D; 680 ms sim after natural split vote; not a bound |
+| TC-032 | F-03 (no quorum SAFE) | RELATED | LOT 2D; SAFE under configuration-forced permanent contention |
+| TC-033 | F-03 (no quorum SAFE) | RELATED | LOT 2D; SAFE under directional cut during retry |
+| TC-034 | R-05 (stale election rejection) | RELATED | LOT 2D; stale VOTE_REQ/VOTE_GRANT during retry |
 
-**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay.
+**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay. LOT 2C and LOT 2D tests TC-013–TC-034 are RELATED evidence only: the current Section 82 transcription (ADD-F001) contains no test case for directional faults, crash, restart or election-retry behaviour, so no FULL mapping is claimed and no ADD identifier is invented.
 
 ---
 
@@ -177,3 +221,193 @@ Test Result / Evidence
 3. **Evidence class** must be explicit (CbD/CbA/CbT/IMPLEMENTED-SIM/etc.)
 4. **Gaps/limitations** documented per trace
 5. **Review at Lot closure** — all traces for Lot requirements must be complete
+
+---
+
+## 6. LOT 2C and LOT 2D Test Cases Traceability (TC-013 through TC-034)
+
+Validated at commit `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea` (205 checks,
+0 failures, ASan/UBSan clean). All evidence is IMPLEMENTED-SIM: deterministic
+host demonstrator only. Line references are to that commit. Where no ADD
+requirement covers a test, the entry says so and the test is recorded as
+verification evidence for a protocol property or invariant. INV-LEADER-UNIQUE
+(maximum concurrent valid leadership authorities observed at the defined
+deterministic observation points ≤ 1) is an invariant, not a requirement ID;
+every test below asserts it.
+
+### TC-013: One-Way Leader Isolation: Authority Expires
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001, REQ-FUNC-0002 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto (lease, quorum-contact evidence) → `mosaik_node.c:368` (step-down at lease expiry) + `mosaik_node.c:321-338` (ACK evidence recorded per peer) + `test_mosaik.c:196-221, 427-445` (renewal only on ACK actually received) → TC-013 → PASS (authority expired under one-way isolation, leader stepped down, max concurrent valid authorities observed 1) → IMPLEMENTED-SIM |
+| **Reverse** | TC-013 → `test_mosaik.c:261` (one-way isolation: leader sends, cannot receive) → lease not renewed → `mosaik_node.c:368` → REQ-FUN-001/002 → REQ-FUNC-0001/0002 |
+| **Limitation** | Deterministic directional model on a virtual bus; lease renewal bookkeeping is harness-mediated from node-recorded ACK evidence; no physical bus behaviour. |
+
+### TC-014: Asymmetric Minority View
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:223-225` (higher term adopted), `mosaik_node.c:89-121` (stale rejection), lease expiry `368` → TC-014 → PASS (no double valid authority, term monotonicity preserved) → IMPLEMENTED-SIM |
+| **Reverse** | TC-014 → `test_mosaik.c:284` (fixed asymmetric directional pattern) → term monotonicity + lease → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | One fixed asymmetric pattern; deterministic host model only. |
+
+### TC-015: Selective Heartbeat Loss
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001, REQ-FUNC-0002 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto → `mosaik_node.c:276` (follower deadline = lease + jitter), `368` (lease expiry step-down), `test_mosaik.c:427-445` (ACK evidence) → TC-015 → PASS (single and transient loss keep one authority; sustained loss invalidates authority and the leader steps down) → IMPLEMENTED-SIM |
+| **Reverse** | TC-015 → `test_mosaik.c:99` (per-path drop patterns: single, two, three consecutive, sustained) → lease and follower deadline → REQ-FUN-001/002 → REQ-FUNC-0001/0002 |
+| **Limitation** | Deterministic loss patterns only; no statistical loss model; host model only. |
+
+### TC-016: Delay Around Lease Boundary
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:89-121` (stale heartbeat rejection), `368` (lease expiry) → TC-016 → PASS (expired authority not resurrected by late delivery at offsets −100, −10, −1, 0, +1, +10, +100 ms; no term regression) → IMPLEMENTED-SIM |
+| **Reverse** | TC-016 → `test_mosaik.c:140` (frame injection at deterministic offsets) → stale rejection + lease expiry → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Seven deterministic offsets in simulated milliseconds; sub-millisecond timing not modelled. |
+
+### TC-017: Message Reordering
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:89-121` (term monotonicity, duplicate sequence), `223-225` → TC-017 → PASS (no term regression, valid authority maintained, no double authority) → IMPLEMENTED-SIM |
+| **Reverse** | TC-017 → `test_mosaik.c:140` (M2 delivered before M1) → term monotonicity → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Single reordering pair; semantic rejection only, no cryptographic anti-replay. |
+
+### TC-018: Partition Heal With Queued Traffic
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001, REQ-FUNC-0002 → REQ-FUN-001, REQ-FUN-002 → L4:svc_mosaik_proto → `mosaik_node.c:89-121` (stale authority via last_hb_term), `223-225` (adopt newer term), quorum election `304-318` → TC-018 → PASS (majority elects new leader at higher term; newer term remains authoritative after heal with queued traffic; old leader adopts newer term; convergence to one valid authority) → IMPLEMENTED-SIM |
+| **Reverse** | TC-018 → `test_mosaik.c:242` (2+1 partition), `140` (queued old traffic), `301` (heal) → stale authority rejection → REQ-FUN-001/002 → REQ-FUNC-0001/0002 |
+| **Limitation** | One deterministic 3-node 2+1 partition and heal; host model only. |
+
+### TC-019: Selective Quorum Contact Failure
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0002, REQ-FUNC-0001 → REQ-FUN-002, REQ-FUN-001 → L4:svc_mosaik_proto → `test_mosaik.c:196-221, 427-445` (fresh received current-term ACK evidence required), `mosaik_node.c:368` (step-down) → TC-019 → PASS (authority expires without inbound quorum contact; leader steps down; new valid leader elected) → IMPLEMENTED-SIM |
+| **Reverse** | TC-019 → outbound-only leader (ACK paths dropped) → no renewal → `mosaik_node.c:368` → election → REQ-FUN-002/001 → REQ-FUNC-0002/0001 |
+| **Limitation** | Harness-mediated renewal bookkeeping; deterministic host model; outbound heartbeat delivery alone never renews (commit `c6f600b`). |
+
+### TC-020: Adversarial Combination
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:89-121, 223-225, 287-291` (stale rejection, term adoption) + lease → TC-020 → PASS (no split-brain, term monotonicity preserved under combined asymmetric, drop, delayed-stale and reordering faults) → IMPLEMENTED-SIM |
+| **Reverse** | TC-020 → `test_mosaik.c:140, 99` (combined faults) → term monotonicity + lease → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | One deterministic combination; not a randomised campaign (LOT 9). |
+
+### TC-021: Follower Crash While Leader and Quorum Available
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199` (cold `mosaik_init()`: term 0, no vote), `223-225` (adopt current term from first higher-term message) → TC-021 → PASS (leader authority and term unchanged during follower crash; restarted follower adopts current term, is follower, holds no vote in the current term; single valid leader) → IMPLEMENTED-SIM. Protocol-property evidence (cold-restart semantics); no ADD requirement for restart behaviour exists in the current transcription. |
+| **Reverse** | TC-021 → `test_mosaik.c:333` (crash), `345` (cold restart) → `mosaik_node.c:160-199, 223-225` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Crash and restart are harness models; no term/vote persistence is implemented; restart loses all volatile state by design. |
+
+### TC-022: Leader Crash
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 → REQ-PERF-001, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:276` (lease-aligned follower deadline), `133-146` (start_election), `148-158` (become_leader on quorum) → TC-022 → PASS (new leader differs from crashed node, term advanced, single valid authority) → IMPLEMENTED-SIM |
+| **Reverse** | TC-022 → `test_mosaik.c:333` (leader crash) → follower timeout → election → REQ-PERF-001/REQ-FUN-001 → REQ-FUNC-0004/0001 |
+| **Limitation** | Simulated time only; the crash instant (2000 ms) is one deterministic case, not a worst case. |
+
+### TC-023: Leader Crash, Election, Former Leader Restarts
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199` (cold init), `223-225` (adopt newer term), `89-121` (stale authority) → TC-023 → PASS (former leader adopts the new term after cold restart, does not regain leadership, new leader retains valid authority, no split-brain) → IMPLEMENTED-SIM |
+| **Reverse** | TC-023 → `test_mosaik.c:333, 345` → `mosaik_node.c:160-199, 223-225` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Cold restart only; no persistence; deterministic host model. |
+
+### TC-024: Crashed Follower Restart and Rejoin
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199` (voted_term and voted_for reset to 0 on cold init), `223-225` → TC-024 → PASS (restarted follower adopts current cluster term, is follower, vote state reset, single valid leader throughout) → IMPLEMENTED-SIM. Protocol-property evidence for cold-restart semantics. |
+| **Reverse** | TC-024 → `test_mosaik.c:333, 345` → `mosaik_node.c:160-199` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Demonstrates loss of volatile vote state on restart; does not demonstrate persistence, which is not implemented. |
+
+### TC-025: Former Leader Restarts After Another Leader Elected
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199, 223-225, 89-121` → TC-025 → PASS (former leader adopts newer term, is follower, new leader retains authority and its term is unchanged, single valid leader) → IMPLEMENTED-SIM |
+| **Reverse** | TC-025 → `test_mosaik.c:333, 345` → newer term adopted, no stale authority → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Cold restart only; deterministic host model. |
+
+### TC-026: Restart With Delayed Pre-Crash Messages Queued
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:89-121` (stale heartbeat), `287-291` (stale VOTE_REQ), `223-225` → TC-026 → PASS (restarted follower adopts current term despite delayed stale pre-crash frames; is follower; single valid leader) → IMPLEMENTED-SIM (Lot 2B rejection under Lot 2D restart) |
+| **Reverse** | TC-026 → `test_mosaik.c:333, 345` + `140, 149` (delayed pre-crash frames) → stale rejection → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Three delayed frames, deterministic; semantic rejection only. |
+
+### TC-027: Repeated Crash/Restart of One Node
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199, 223-225` → TC-027 → PASS (after five crash/restart cycles the node adopts the current term, is follower, single valid leader maintained, leader term unchanged) → IMPLEMENTED-SIM. Protocol-property evidence (no state corruption across repeated cold restarts). |
+| **Reverse** | TC-027 → `test_mosaik.c:333, 345` ×5 → `mosaik_node.c:160-199` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Five deterministic cycles; cold restart only. |
+
+### TC-028: Crash During/Near Lease Expiry
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 → REQ-PERF-001, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:276` (lease-aligned follower deadline), `296` (one vote per term), `384-405` (candidate retry backoff, C2-a), `133-146`, `148-158` + `test_mosaik.c:427-445` (received-ACK evidence for the isolation setup) → TC-028 → PASS (leader crashed at 2366 ms with 50 ms lease remaining; natural split vote at 2822; node 3 valid at 2994 ms, 628 ms after the crash in the host model; term 3; single valid authority) → IMPLEMENTED-SIM. History: FAIL at `9e3f061`, `c6f600b`, `d38985d`; PASS since `f4e0f3c`. Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §5–§10. |
+| **Reverse** | TC-028 → `test_mosaik.c:333` (crash), ACK paths dropped → `mosaik_node.c:384-405` (retry backoff) → election → REQ-PERF-001/REQ-FUN-001 → REQ-FUNC-0004/0001 |
+| **Limitation** | One deterministic recovery time in the host model, not a worst-case bound; the first collision remains possible; sub-millisecond bus races not modelled. |
+
+### TC-029: Crash During Election (Candidate)
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:133-146` (self-vote in current term), `160-199` (cold init resets term, voted_for, voted_term), `296` (one vote per term) → TC-029 → PASS (candidate self-voted in its term; after cold restart term, voted_for and voted_term are 0; no duplicate vote in the original term; single valid leader) → IMPLEMENTED-SIM |
+| **Reverse** | TC-029 → `test_mosaik.c:333, 345` (candidate crashed and restarted) → `mosaik_node.c:133-146, 160-199, 296` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Cold restart only; the printed `voted_term` value depends on the deterministic retry timing (4 at `f4e0f3c`). |
+
+### TC-030: Recovery Under Asymmetric Network
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:160-199, 223-225, 89-121` + lease → TC-030 → PASS (no split-brain during crash and restart under directional faults; term monotonicity preserved) → IMPLEMENTED-SIM |
+| **Reverse** | TC-030 → `test_mosaik.c:333, 345` under `284`/`99` directional faults → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | One deterministic asymmetric pattern; host model only. |
+
+### TC-031: Natural Election Collision, Randomized Retry Recovery
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0004, REQ-PERF-0001, REQ-FUNC-0001 → REQ-PERF-001, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:384-405` (C2-a: failed timeout, backoff, retry via start_election), `296` (one vote per term), `304-318` (quorum) + `test_mosaik.c:2211` (read-only shared-deadline finder), `2255` (read-only observer), `2295` → TC-031 → PASS (natural split vote at term 2; retry deadlines desynchronized; exactly one failed election per survivor; no SAFE; node 1 valid at 2696 ms, 680 ms after the crash at 2016 in the host model; term 3; max valid authorities 1; no term regression) → IMPLEMENTED-SIM. History: 6 checks RED at `d38985d` by design; PASS since `f4e0f3c`. Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §7–§10. |
+| **Reverse** | TC-031 → leader crashed at a naturally shared follower deadline (no protocol internal written) → `mosaik_node.c:384-405` → election → REQ-PERF-001/REQ-FUN-001 → REQ-FUNC-0004/0001 |
+| **Limitation** | Deterministic host model; one measured recovery, not a bound; collisions remain possible; no hardware timing. |
+
+### TC-032: Permanent Retry Contention Keeps SAFE Contract
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0002, REQ-SAFE-0003 → REQ-FUN-002, REQ-SAF-002 → L4:svc_mosaik_proto → `mosaik_node.h:47` + `mosaik_node.c:398-404` (`candidate_retry_backoff_span_ms` = 1, zero effective desynchronisation), `384-387` (SAFE after max_failed_elections) + `test_mosaik.c:309` (configuration-taking init) → TC-032 → PASS (retries stayed synchronized; no authority manufactured; exactly three genuine failed vote timeouts on each survivor; SAFE/NO_QUORUM on both at 2980 ms; max valid authorities 1) → IMPLEMENTED-SIM. Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §10–§11. |
+| **Reverse** | TC-032 → backoff span 1 by public configuration → `mosaik_node.c:384-387` (enter_safe NO_QUORUM) → REQ-SAF-002/REQ-FUN-002 → REQ-SAFE-0003/REQ-FUNC-0002 |
+| **Limitation** | Configuration-forced contention in the host model; SAFE latch only, no ground-arbitration exit (ADD-F009). |
+
+### TC-033: Asymmetric Partition During Retry
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0002, REQ-SAFE-0003, REQ-FUNC-0001 → REQ-FUN-002, REQ-SAF-002, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:304-318` (quorum requires a received grant), `384-405` (retry backoff and SAFE) + `test_mosaik.c:99` (one direction dropped after the collision) → TC-033 → PASS (no valid authority ever; no term regression; both survivors SAFE/NO_QUORUM only after three genuine failed timeouts; max valid authorities 1) → IMPLEMENTED-SIM. Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §10–§11. |
+| **Reverse** | TC-033 → natural collision, then path a→b dropped → no grant can arrive → `mosaik_node.c:384-387` → REQ-SAF-002/REQ-FUN-002/REQ-FUN-001 → REQ-SAFE-0003/REQ-FUNC-0002/0001 |
+| **Limitation** | One deterministic directional cut; host model only. |
+
+### TC-034: Stale Delayed Election Traffic During Retry
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:287-291` (stale VOTE_REQ rejected), `305-309` (stale VOTE_GRANT rejected), `384-405` (retry rules) + `test_mosaik.c:99` (NET_DELAY on the real term-2 VOTE_REQ), `149` (replayed term-2 VOTE_GRANT) → TC-034 → PASS (receiver advanced beyond the collision term; both delayed frames rejected as stale; no term regression; no authority in the collision term; eventual leader at term 3; SAFE if and only if max_failed_elections genuine failures; max valid authorities 1) → IMPLEMENTED-SIM (Lot 2B rejection under Lot 2D retry). Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §10–§11. |
+| **Reverse** | TC-034 → delayed old-term VOTE_REQ and replayed VOTE_GRANT → `mosaik_node.c:287-291, 305-309` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Semantic rejection only; one deterministic 320 ms delay; no cryptographic anti-replay. |
+
