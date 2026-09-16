@@ -1,7 +1,7 @@
 # MOSAÏK Bidirectional Traceability
 
 **Document:** MOSAIK-TRACE-001  
-**Issue:** 1.2 — 16 September 2026  
+**Issue:** 1.3 — 16 September 2026  
 **Purpose:** Bidirectional traceability matrix linking ADD requirements ↔ derived requirements ↔ architecture ↔ implementation ↔ test ↔ result ↔ evidence
 
 ---
@@ -168,6 +168,22 @@ Test Result / Evidence
 | TC-032 | REQ-FUNC-0002, REQ-SAFE-0003 | REQ-FUN-002, REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:384-387, 398-404` (span 1) | PASS (SAFE at 2980 ms) | IMPLEMENTED-SIM |
 | TC-033 | REQ-FUNC-0002, REQ-SAFE-0003, REQ-FUNC-0001 | REQ-FUN-002, REQ-SAF-002, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:304-318, 384-405` | PASS | IMPLEMENTED-SIM |
 | TC-034 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:287-291, 305-309, 384-405` | PASS | IMPLEMENTED-SIM |
+| TC-035 | REQ-SAFE-0003, REQ-FUNC-0004 | REQ-SAF-002, REQ-PERF-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:71, 245` | PASS | IMPLEMENTED-SIM |
+| TC-036 | REQ-SAFE-0003 | REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:245` | PASS | IMPLEMENTED-SIM |
+| TC-037 | REQ-SAFE-0003 | REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:245` | PASS | IMPLEMENTED-SIM |
+| TC-038 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:368` | PASS | IMPLEMENTED-SIM |
+| TC-039 | REQ-SAFE-0004 | REQ-SAF-003 | Cluster_Task / svc_mosaik_proto (SAFE evidence) | `mosaik_node.c:128, 376, 292, 168` | PASS (RED at af5da87) | IMPLEMENTED-SIM |
+| TC-040 | REQ-SAFE-0004, REQ-FUNC-0001 | REQ-SAF-003, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:400, 183` | PASS (RED at af5da87) | IMPLEMENTED-SIM |
+| TC-041 | REQ-SAFE-0003, REQ-FUNC-0002 | REQ-SAF-002, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:443, 245` | PASS | IMPLEMENTED-SIM |
+| TC-042 | REQ-FUNC-0004, REQ-PERF-0001 | REQ-PERF-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:425, 443` | PASS (host observations) | IMPLEMENTED-SIM |
+| TC-043 | REQ-FUNC-0007 | REQ-ICD-002 | svc_mosaik_proto | `mosaik_proto.c:mosaik_decode`, `mosaik_node.c:238` | PASS | PARTIAL |
+| TC-044 | REQ-FUNC-0002, REQ-SAFE-0003 | REQ-FUN-002, REQ-SAF-002 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:461, 443` | PASS | IMPLEMENTED-SIM |
+| TC-045 | REQ-SAFE-0004 | REQ-SAF-003 | Cluster_Task / svc_mosaik_proto (SAFE evidence) | `mosaik_node.c:376, 400` | PASS (RED at af5da87) | IMPLEMENTED-SIM |
+| TC-046 | REQ-FUNC-0004, REQ-FUNC-0001 | REQ-PERF-001, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:425, 141` | PASS | IMPLEMENTED-SIM |
+| TC-047 | REQ-SAFE-0004, REQ-FUNC-0001 | REQ-SAF-003, REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:292` | PASS (RED at af5da87) | IMPLEMENTED-SIM |
+| TC-048 | REQ-SAFE-0004, REQ-FUNC-0004 | REQ-SAF-003, REQ-PERF-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:168, 400` | PASS (RED at af5da87) | IMPLEMENTED-SIM |
+| TC-049 | NONE (reproducibility) | — | svc_mosaik_proto | deterministic RNG | PASS | IMPLEMENTED-SIM |
+| TC-050 | NONE (protocol invariant; related REQ-FUNC-0001) | — | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:141, 324` | PASS (RED at af5da87; green at 034db92) | IMPLEMENTED-SIM |
 
 ---
 
@@ -209,8 +225,24 @@ Test Result / Evidence
 | TC-032 | F-03 (no quorum SAFE) | RELATED | LOT 2D; SAFE under configuration-forced permanent contention |
 | TC-033 | F-03 (no quorum SAFE) | RELATED | LOT 2D; SAFE under directional cut during retry |
 | TC-034 | R-05 (stale election rejection) | RELATED | LOT 2D; stale VOTE_REQ/VOTE_GRANT during retry |
+| TC-035 | S-01 (SAFE latch), F-01 (leader election) | RELATED | LOT 3; SAFE contract and recovery around a SAFE node |
+| TC-036 | S-01 (SAFE latch) | RELATED | LOT 3; SAFE non-participation |
+| TC-037 | S-01 (SAFE latch) | RELATED | LOT 3; latch against adversarial traffic |
+| TC-038 | F-02 (split-brain absence) | RELATED | LOT 3; SAFE not propagated |
+| TC-039 | — | NONE | LOT 3; DEGRADED persistence; no Section 82 test case for DEGRADED (ADD-F011) |
+| TC-040 | — | NONE | LOT 3; DEGRADED expiry and cold-restart rejoin |
+| TC-041 | F-03 (no quorum SAFE) | RELATED | LOT 3; exhaustion terminal after restore |
+| TC-042 | P-01 (failover latency) | RELATED | LOT 3; isolation boundary, host observations only |
+| TC-043 | I-01 (codec/CRC) | RELATED | LOT 3; detection-only, PROTO_ERROR reserved |
+| TC-044 | F-03 (no quorum SAFE) | RELATED | LOT 3; crash during recovery |
+| TC-045 | — | NONE | LOT 3; bounded replayed SAFE evidence |
+| TC-046 | P-01 (failover latency) | RELATED | LOT 3; repeated transient recovery |
+| TC-047 | S-01, R-01 (stale term rejection) | RELATED | LOT 3; adversarial combination |
+| TC-048 | P-01 (failover latency) | RELATED | LOT 3; adversarial combination |
+| TC-049 | — | NONE | LOT 3; reproducibility |
+| TC-050 | F-01 (leader election) | RELATED | LOT 2 erratum found in LOT 3; one vote per term across same-term demotion |
 
-**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay. LOT 2C and LOT 2D tests TC-013–TC-034 are RELATED evidence only: the current Section 82 transcription (ADD-F001) contains no test case for directional faults, crash, restart or election-retry behaviour, so no FULL mapping is claimed and no ADD identifier is invented.
+**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay. LOT 2C and LOT 2D tests TC-013–TC-034 are RELATED evidence only: the current Section 82 transcription (ADD-F001) contains no test case for directional faults, crash, restart or election-retry behaviour, so no FULL mapping is claimed and no ADD identifier is invented. LOT 3 tests TC-035–TC-050 follow the same rule: RELATED where a Section 82 test case examines similar SAFE, quorum, latency or codec behaviour, NONE for DEGRADED semantics (ADD-F011), reproducibility and the one-vote invariant.
 
 ---
 
@@ -227,7 +259,9 @@ Test Result / Evidence
 ## 6. LOT 2C and LOT 2D Test Cases Traceability (TC-013 through TC-034)
 
 Validated at commit `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea` (205 checks,
-0 failures, ASan/UBSan clean). All evidence is IMPLEMENTED-SIM: deterministic
+0 failures, ASan/UBSan clean) and re-validated unchanged, byte-identical
+output, at `7df0af0` (360 checks, 0 failures). Line references below are to
+`f4e0f3c`. All evidence is IMPLEMENTED-SIM: deterministic
 host demonstrator only. Line references are to that commit. Where no ADD
 requirement covers a test, the entry says so and the test is recorded as
 verification evidence for a protocol property or invariant. INV-LEADER-UNIQUE
@@ -410,4 +444,142 @@ every test below asserts it.
 | **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:287-291` (stale VOTE_REQ rejected), `305-309` (stale VOTE_GRANT rejected), `384-405` (retry rules) + `test_mosaik.c:99` (NET_DELAY on the real term-2 VOTE_REQ), `149` (replayed term-2 VOTE_GRANT) → TC-034 → PASS (receiver advanced beyond the collision term; both delayed frames rejected as stale; no term regression; no authority in the collision term; eventual leader at term 3; SAFE if and only if max_failed_elections genuine failures; max valid authorities 1) → IMPLEMENTED-SIM (Lot 2B rejection under Lot 2D retry). Evidence: LOT2D_CRASH_RECOVERY_REPORT.md §10–§11. |
 | **Reverse** | TC-034 → delayed old-term VOTE_REQ and replayed VOTE_GRANT → `mosaik_node.c:287-291, 305-309` → REQ-FUN-001 → REQ-FUNC-0001 |
 | **Limitation** | Semantic rejection only; one deterministic 320 ms delay; no cryptographic anti-replay. |
+
+---
+
+## 7. LOT 3 Test Cases Traceability (TC-035 through TC-050)
+
+Validated at commit `7df0af01d6ae2120bce9a5c6378305e3ef7eeb5c` (360 checks,
+0 failures, ASan/UBSan clean). Line references are to that commit. RED
+evidence at `af5da87` is recorded per test. All evidence is IMPLEMENTED-SIM:
+deterministic host demonstrator only. Where no ADD requirement covers a
+test, the entry says NONE and names the invariant or property evidenced.
+
+### TC-035: SAFE Node: No Authority, SAFE-Only Transmission, Cluster Recovers Around It
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0003, REQ-FUNC-0004, REQ-FUNC-0001 → REQ-SAF-002, REQ-PERF-001, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:71` (enter_safe: follower role, SAFE announce), `245` (receive gate) + service gate in `mosaik_tick()` → TC-035 → PASS (SAFE node never valid or leader, SAFE frames only; survivors elected node 3 at 2452 ms, 452 ms after the latch; SAFE node did not recover) → IMPLEMENTED-SIM |
+| **Reverse** | TC-035 → TC-004 style same-term heartbeat delivered to the leader → `mosaik_node.c:71, 245` → REQ-SAF-002/REQ-PERF-001 → REQ-SAFE-0003/REQ-FUNC-0004 |
+| **Limitation** | Deterministic host model; recovery time is one observation, not a bound. |
+
+### TC-036: SAFE Node Grants No Vote, Sends No ACK, Never Becomes Candidate
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0003 → REQ-SAF-002 → L4:svc_mosaik_proto → `mosaik_node.c:245` (SAFE gate precedes term adoption and every handler) → TC-036 → PASS (0 grants, 0 ACKs, 0 elections after admissible higher-term VOTE_REQ and HEARTBEAT; term unchanged) → IMPLEMENTED-SIM |
+| **Reverse** | TC-036 → targeted higher-term frames to the SAFE node → `mosaik_node.c:245` → REQ-SAF-002 → REQ-SAFE-0003 |
+| **Limitation** | Targeted single-frame delivery; host model only. |
+
+### TC-037: SAFE Latch Against Old-, Same- and Higher-Term Traffic, Grants, Replays and Connectivity
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0003 → REQ-SAF-002 → L4:svc_mosaik_proto → `mosaik_node.c:245` → TC-037 → PASS (state, cause, term and role unchanged after every frame class, isolation and restore) → IMPLEMENTED-SIM. INV-SAFE-LATCH evidence. |
+| **Reverse** | TC-037 → adversarial frames and `test_mosaik.c` isolate/restore → `mosaik_node.c:245` → REQ-SAF-002 → REQ-SAFE-0003 |
+| **Limitation** | Latch demonstrated within one powered node instance; a cold restart clears SAFE (no persistence). |
+
+### TC-038: SAFE Frames Do Not Propagate SAFE
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0001 → REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:368` (SAFE handler records evidence and sets DEGRADED only) → TC-038 → PASS (max simultaneous SAFE nodes 1 under genuine, replayed and forged SAFE frames; one valid leader) → IMPLEMENTED-SIM |
+| **Reverse** | TC-038 → `bus_inject_frame` replays and a forged SAFE → `mosaik_node.c:368` → REQ-FUN-001 → REQ-FUNC-0001 |
+| **Limitation** | Trusted bus assumption; forgery only demonstrates non-propagation. |
+
+### TC-039: DEGRADED Persists While Peer SAFE Evidence Is Fresh, No Flapping
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0004 → REQ-SAF-003 → L4:svc_mosaik_proto → `mosaik_node.c:128` (freshness helper), `376` (evidence record), `292` (heartbeat state decision), `168` (become_leader decision) → TC-039 → PASS at `7df0af0` (0 DEGRADED→NOMINAL transitions, 0 NOMINAL steps after the first SAFE announcement on both survivors; leader valid while DEGRADED). RED at `af5da87`: 26 and 1 transitions, 1273 and 50 NOMINAL steps → IMPLEMENTED-SIM. First executable evidence for REQ-SAFE-0004. |
+| **Reverse** | TC-039 → leader SAFE via same-term heartbeat, 3 s observation → `mosaik_node.c:376, 292, 168` → REQ-SAF-003 → REQ-SAFE-0004 |
+| **Limitation** | Host interpretation of exit and freshness (ADD-F011); evidence from received frames only. |
+
+### TC-040: SAFE Evidence Expiry, Return to NOMINAL, SAFE Node Recovers Only by Cold Restart
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0004, REQ-FUNC-0001 → REQ-SAF-003, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:400` (DEGRADED exit with leader evidence), `183` (cold init zeroes evidence) → TC-040 → PASS at `7df0af0` (both survivors NOMINAL 600 ms after the SAFE node was crashed; restarted node rejoined NOMINAL at term 2; leader and term unchanged). RED at `af5da87`: leader stayed DEGRADED → IMPLEMENTED-SIM |
+| **Reverse** | TC-040 → `bus_crash_node` then `bus_restart_node` of the SAFE node → `mosaik_node.c:400, 183` → REQ-SAF-003 → REQ-SAFE-0004 |
+| **Limitation** | Cold restart is the only SAFE exit; no persistence; host model. |
+
+### TC-041: Election Exhaustion Terminal Even After Connectivity Returns
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0003, REQ-FUNC-0002 → REQ-SAF-002, REQ-FUN-002 → L4:svc_mosaik_proto → `mosaik_node.c:443` (third failure → SAFE/NO_QUORUM), `245` → TC-041 → PASS (three nodes SAFE at term 4 through exactly max_failed_elections genuine failures; no exit, no authority, no non-SAFE traffic after restore) → IMPLEMENTED-SIM |
+| **Reverse** | TC-041 → sequential full isolation of two nodes, then restore → `mosaik_node.c:443` → REQ-SAF-002/REQ-FUN-002 → REQ-SAFE-0003/REQ-FUNC-0002 |
+| **Limitation** | Cluster-wide SAFE through quorum loss, not propagation; recovery requires cold restart, not implemented as a protocol path. |
+
+### TC-042: Leader Isolation Boundary With Recovered Predicate
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0004, REQ-PERF-0001 → REQ-PERF-001 → L4:svc_mosaik_proto → `mosaik_node.c:425` (lease expiry step-down), `141`, `443` → TC-042 → PASS (600 and 900 ms isolations recovered with the recovered predicate; 1200, 1500 and 2000 ms latched SAFE; monotonic; INV-LEADER-UNIQUE held in every run) → IMPLEMENTED-SIM |
+| **Reverse** | TC-042 → `test_mosaik.c` isolate/restore sweep and `cluster_recovered()` (read-only) → `mosaik_node.c:425, 443` → REQ-PERF-001 → REQ-FUNC-0004 |
+| **Limitation** | Durations are deterministic host observations under current timers (D6), not worst-case bounds. |
+
+### TC-043: Malformed Frames Detection-Only
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0007 → REQ-ICD-002 → L4:svc_mosaik_proto → `mosaik_proto.c:mosaik_decode()` (CRC reject), `mosaik_node.c:238` (count only) → TC-043 → PASS (50 corrupted frames counted, no state, term or authority change) → PARTIAL (PROTO_ERROR reserved, decision D2) |
+| **Reverse** | TC-043 → CRC-corrupted frames via `bus_inject_frame` → `mosaik_node.c:238` → REQ-ICD-002 → REQ-FUNC-0007 |
+| **Limitation** | No PROTO_ERROR threshold, window or recovery is defined by the transcription; none implemented. |
+
+### TC-044: Survivor Crash During Collision Recovery
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0002, REQ-SAFE-0003 → REQ-FUN-002, REQ-SAF-002 → L4:svc_mosaik_proto → `mosaik_node.c:461` (retry backoff), `443` → TC-044 → PASS (lone survivor SAFE/NO_QUORUM after exactly three genuine failures, no authority ever) → IMPLEMENTED-SIM |
+| **Reverse** | TC-044 → natural collision, `bus_crash_node` during backoff → `mosaik_node.c:461, 443` → REQ-FUN-002 → REQ-FUNC-0002 |
+| **Limitation** | Deterministic host model. |
+
+### TC-045: Replayed SAFE Evidence Bounded, Local Evidence Only
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0004 → REQ-SAF-003 → L4:svc_mosaik_proto → `mosaik_node.c:376`, `128`, `400` → TC-045 → PASS at `7df0af0` (receiver DEGRADED for exactly 300 ms then NOMINAL; non-receivers 0 DEGRADED steps; nobody SAFE). RED at `af5da87`: 15 ms run → IMPLEMENTED-SIM. INV-FDIR-NO-MAGIC evidence. |
+| **Reverse** | TC-045 → one replayed SAFE frame delivered to one follower via the directional model → `mosaik_node.c:376, 400` → REQ-SAF-003 → REQ-SAFE-0004 |
+| **Limitation** | Window derived from heartbeat period; host model. |
+
+### TC-046: Three Transient Leader Isolations Recover Without SAFE
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-FUNC-0004, REQ-FUNC-0001 → REQ-PERF-001, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:425`, `141` → TC-046 → PASS (three 800 ms isolations recovered, recovered predicate after each, max failed elections 0, no SAFE) → IMPLEMENTED-SIM |
+| **Reverse** | TC-046 → repeated isolate/restore → `mosaik_node.c:425` → REQ-PERF-001 → REQ-FUNC-0004 |
+| **Limitation** | Fixed 800 ms cycles under current timers; host observation. |
+
+### TC-047: Leader SAFE + Stale Heartbeat Replay + One-Way Drop During Election
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0004, REQ-FUNC-0001 → REQ-SAF-003, REQ-FUN-001 → L4:svc_mosaik_proto → `mosaik_node.c:292` (state decision after stale rejection), stale heartbeat rejection in `check_heartbeat_stale()` → TC-047 → PASS at `7df0af0` (one valid leader at term 3; stale replay rejected twice; 0 NOMINAL steps after DEGRADED). RED at `af5da87`: 2063 and 87 NOMINAL steps → IMPLEMENTED-SIM |
+| **Reverse** | TC-047 → `bus_schedule_delayed` replay + `bus_set_net_action` one-way drop → `mosaik_node.c:292` → REQ-SAF-003/REQ-FUN-001 → REQ-SAFE-0004/REQ-FUNC-0001 |
+| **Limitation** | One deterministic adversarial combination. |
+
+### TC-048: Leader Crash + Natural Collision + Delayed SAFE Frame During Backoff
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | REQ-SAFE-0004, REQ-FUNC-0004 → REQ-SAF-003, REQ-PERF-001 → L4:svc_mosaik_proto → `mosaik_node.c:168` (become_leader DEGRADED while evidence fresh), `292`, `400` → TC-048 → PASS at `7df0af0` (valid leader 680 ms after the crash; DEGRADED runs exactly 300 ms on both survivors; NOMINAL afterwards). RED at `af5da87`: 16 and 17 ms runs → IMPLEMENTED-SIM |
+| **Reverse** | TC-048 → natural shared deadline crash + `bus_inject_frame` SAFE attributed to the crashed leader → `mosaik_node.c:168, 400` → REQ-SAF-003/REQ-PERF-001 → REQ-SAFE-0004/REQ-FUNC-0004 |
+| **Limitation** | Deterministic host model; recovery time is one observation. |
+
+### TC-049: Deterministic Reproducibility of the SAFE/DEGRADED Scenario
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | NONE (reproducibility evidence) → per-node xorshift RNG seeded by id, integer-only simulation → TC-049 → PASS (identical per-step trajectory hash on two runs) → IMPLEMENTED-SIM |
+| **Reverse** | TC-049 → repeated scenario → deterministic core and harness → NONE |
+| **Limitation** | Reproducibility of the host model only. |
+
+### TC-050: One Vote Per Term Across a Same-Term Step-Down (LOT 2 Erratum)
+
+| Direction | Trace |
+|-----------|-------|
+| **Forward** | NONE as a requirement ID; protocol invariant of PROTOCOL.md section 7 (one vote per term), related to REQ-FUNC-0001 → L4:svc_mosaik_proto → `mosaik_node.c:141` (become_follower no longer erases vote memory, commit `034db92`), `324` (one-vote check keyed on voted_term) → TC-050 → PASS since `034db92` (vote (2,1) preserved across the lease-expiry demotion, 0 same-term grants, 1 higher-term grant). RED at `af5da87`: vote erased to (0,1), same-term grant emitted → IMPLEMENTED-SIM |
+| **Reverse** | TC-050 → ACK paths dropped, lease expiry, same-term and higher-term VOTE_REQ via bus → `mosaik_node.c:141, 324` → PROTOCOL.md §7 → related REQ-FUNC-0001 |
+| **Limitation** | LOT 2 erratum discovered in LOT 3; concurrent double authority was not observed and is not reachable with current timers; historical LOT 2 evidence unchanged. |
 

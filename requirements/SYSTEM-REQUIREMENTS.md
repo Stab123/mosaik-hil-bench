@@ -1,7 +1,7 @@
 # MOSAÏK System Requirements Baseline
 
 **Document:** MOSAIK-SYSREQ-001  
-**Issue:** 1.1 — 15 September 2026  
+**Issue:** 1.2 — 16 September 2026  
 **Source:** MOSAIK-ADD-0001, Issue 1 / Rev 1, dated 24 April 2026  
 **Scope:** Structured transcription of ADD requirements relevant to software/system implementation
 
@@ -26,7 +26,7 @@ The ADD contains at least two requirement naming schemes:
 
 | ID | Statement (normalized) | Required Verification Method | Impl Status | Evidence Status | Notes |
 |----|------------------------|---------------------|-------------|-----------------|-------|
-| REQ-FUNC-0001 | One and only one active leader outside a declared partition | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: TC-001, TC-002, TC-007 | "Outside declared partition" — see ADD-F002 |
+| REQ-FUNC-0001 | One and only one active leader outside a declared partition | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: TC-001, TC-002, TC-007; LOT3: TC-035, TC-038, TC-047 | "Outside declared partition" — see ADD-F002 |
 | REQ-FUNC-0002 | Major reconfiguration requires formal majority quorum | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: quorum=2 for 3-node | 3-node subset only; GSE voting role TBC — see ADD-F008 |
 | REQ-FUNC-0003 | Heartbeat nominal period 100 ms | CbT | IMPLEMENTED-SIM | LOT1: TC-006 (period), TC-001 | Host sim only; derived tolerance ±2% — see ADD-F010 |
 | REQ-FUNC-0004 | Leader loss detection and re-election < 1 s | CbT | IMPLEMENTED-SIM | LOT2A: TC-003 (452 ms sim); LOT2D: TC-028 (628 ms sim), TC-031 (680 ms sim, after one split vote) | Simulated time only; not a worst-case bound |
@@ -43,8 +43,8 @@ The ADD contains at least two requirement naming schemes:
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-SAFE-0001 | No single point of failure shall cause loss of mission | CbA, CbT | DESIGN-ONLY | — | Architecture-level |
 | REQ-SAFE-0002 | Split-brain shall be detected and latched within 10 ms | CbT | IMPLEMENTED-SIM | LOT2A: TC-004 (0 ms sim) | Host sim detection path |
-| REQ-SAFE-0003 | SAFE mode shall be irreversible without ground arbitration | CbD | IMPLEMENTED-SIM | LOT2A: TC-004, TC-005 | Latch implemented; PGA not implemented — see ADD-F009 |
-| REQ-SAFE-0004 | Cluster shall enter DEGRADED when peer enters SAFE | CbD | IMPLEMENTED-SIM | LOT2A: TC-004 | State transition implemented |
+| REQ-SAFE-0003 | SAFE mode shall be irreversible without ground arbitration | CbD | IMPLEMENTED-SIM | LOT2A: TC-004, TC-005; LOT3: TC-035–TC-037, TC-041 | Software latch within one powered node instance; cold restart clears it (no persistence); PGA not implemented — see ADD-F009 |
+| REQ-SAFE-0004 | Cluster shall enter DEGRADED when peer enters SAFE | CbD | IMPLEMENTED-SIM | LOT3: TC-039, TC-040 (first executable evidence), TC-045, TC-047, TC-048 | TC-004 asserts SAFE entry only, not peer DEGRADED; exit/freshness semantics are a host interpretation — see ADD-F011 |
 
 ### 2.3 Performance Requirements (REQ-PERF)
 
@@ -68,7 +68,7 @@ The ADD contains at least two requirement naming schemes:
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-IF-0001 | CAN-FD primary backbone ICD | CbD, CbT | DESIGN-ONLY | — | LOT 6 |
 | REQ-IF-0002 | Ethernet secondary data network | CbD, CbT | NOT-STARTED | — | LOT 6 |
-| REQ-IF-0003 | Wired safety discretes (SAFE_ASSERT, E_STOP, NODE_FAULT_N, POWER_EN, LEADER_ASSERT) | CbD, CbT | DESIGN-ONLY | — | LOT 3, 11 |
+| REQ-IF-0003 | Wired safety discretes (SAFE_ASSERT, E_STOP, NODE_FAULT_N, POWER_EN, LEADER_ASSERT) | CbD, CbT | DESIGN-ONLY | — | LOT 11; LOT 3 documented the interface gap only, no software substitute |
 | REQ-IF-0004 | 24 V distributed power interface | CbD, CbT | NOT-STARTED | — | LOT 13 |
 
 ### 2.6 Logging Requirements (REQ-LOG)

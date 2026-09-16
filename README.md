@@ -11,7 +11,7 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 205 checks across 34 test cases, run by
+with `-Wall -Wextra -Werror` and passes 360 checks across 50 test cases, run by
 CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
 leader from retaining authority indefinitely during a 2+1 network partition.
 Lot 2B adds stale/replay message immunity using semantic rejection based on
@@ -19,7 +19,10 @@ term monotonicity, lease validity, and sender state. Lot 2C adds a directional
 network fault model and restricts lease renewal to acknowledgements actually
 received by the leader. Lot 2D adds crash and cold-restart models and a
 randomised candidate retry backoff that stops a split vote from persisting in
-lock-step (see `LOT2D_CRASH_RECOVERY_REPORT.md`).
+lock-step (see `LOT2D_CRASH_RECOVERY_REPORT.md`). Lot 3 formalises and tests
+the SAFE contract and makes DEGRADED persist on fresh, locally received peer
+SAFE evidence; its adversarial tests also exposed and closed a LOT 2 erratum
+in same-term vote memory (see `LOT3_FDIR_SAFE_REPORT.md`).
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -51,6 +54,13 @@ procured. No measured latency is reported anywhere in this repository.
   colliding candidates do not retry in lock-step until SAFE — verified by
   TC-021 through TC-034, with the defect captured RED at commit `d38985d`
   before the fix.**
+- **FDIR / SAFE semantics (Lot 3): a SAFE node holds no authority, never
+  votes, acknowledges or runs, transmits SAFE announcements only and is
+  latched for the lifetime of one powered node instance; DEGRADED is held
+  while a peer's received SAFE evidence is fresh (3 heartbeat periods) and
+  does not revoke authority; the cluster recovers around a SAFE node —
+  verified by TC-035 through TC-050, captured RED at commit `af5da87` before
+  the corrections `034db92` and `7df0af0`.**
 
 ## What it does not demonstrate
 
@@ -75,6 +85,10 @@ procured. No measured latency is reported anywhere in this repository.
   shows recovery from the tested collision cases in the deterministic host
   model (628 ms and 680 ms after the crash); it does not bound the hardware
   worst case and does not model sub-millisecond bus races.**
-- **Term or vote persistence across restart. A restart is a cold start.**
+- **Term or vote persistence across restart. A restart is a cold start, and
+  it also clears SAFE: SAFE is not persisted across a power cycle.**
+- **Ground arbitration (PGA), a SAFE exit API, a PROTO_ERROR policy, safety
+  discretes, watchdogs, or any hardware FDIR. Malformed frames are counted
+  and never cause SAFE.**
 
 ## Build and test

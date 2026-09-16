@@ -1,7 +1,7 @@
 # MOSAÏK ADD Findings Register
 
 **Document:** MOSAIK-ADD-FIND-001  
-**Issue:** 1.1 — 15 September 2026  
+**Issue:** 1.2 — 16 September 2026  
 **Purpose:** Formal documentation of discrepancies, conflicts, and interpretations found in MOSAIK-ADD-0001
 
 ---
@@ -142,6 +142,18 @@ Each finding contains:
 | **Status** | OPEN |
 | **Resolution** | — |
 
+### ADD-F011: DEGRADED Exit and Freshness Semantics Not Defined
+
+| Field | Detail |
+|-------|--------|
+| **Source** | ADD Section 10 REQ-SAFE-0004 "Cluster shall enter DEGRADED when peer enters SAFE"; ADD Section 82 REQ-SAF-003; ADD Section 4 mode table (DEGRADED exit: "Further fault → SAFE, or recovery → NOMINAL") |
+| **Class** | ADD-INTERNAL, IMPLEMENTATION-GAP |
+| **Issue** | The transcribed requirement defines DEGRADED entry on a peer's SAFE but defines neither how a node knows a peer is still SAFE, how long that knowledge stays valid, nor what "recovery → NOMINAL" requires. Before LOT 3 the host demonstrator entered DEGRADED on a received SAFE frame and cleared it on the next accepted heartbeat, so followers flapped every heartbeat while a peer was SAFE and a leader never left DEGRADED. The evidence cited for REQ-SAFE-0004 (TC-004) asserts SAFE entry only, not peer DEGRADED behaviour. |
+| **Impact** | REQ-SAFE-0004 was not met in substance and had no executable evidence. |
+| **Proposed Interpretation** | Implemented in LOT 3 (commit `7df0af0`) as the host-demonstrator interpretation, to be confirmed by architecture review:<br/>- an actually received peer SAFE frame creates local per-peer evidence (`last_safe_rx_ms[]`, `safe_evidence_mask`);<br/>- evidence freshness is 3 heartbeat periods, derived from `heartbeat_period_ms` (300 ms by default), not a separate parameter;<br/>- DEGRADED is held while any peer evidence is fresh;<br/>- a normal heartbeat or leadership acquisition cannot prematurely clear it;<br/>- after evidence expires, NOMINAL requires legitimate locally known leader evidence (a leader with valid authority, or a follower that knows its leader with its heartbeat deadline in the future);<br/>- no topology or harness knowledge is used; a dropped SAFE frame is absence of evidence;<br/>- DEGRADED does not revoke legitimate leadership authority or change quorum and voting.<br/>**Requirement text** says only "enter DEGRADED when peer enters SAFE". Everything above beyond entry is **host-demonstrator interpretation**. First executable evidence: TC-039, TC-040; adversarial evidence: TC-045, TC-047, TC-048 (LOT3_FDIR_SAFE_REPORT.md). |
+| **Status** | OPEN (interpretation implemented; normative confirmation pending) |
+| **Resolution** | — |
+
 ---
 
 ## 3. Finding Status Summary
@@ -158,6 +170,7 @@ Each finding contains:
 | ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN |
 | ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | OPEN |
 | ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | OPEN |
+| ADD-F011 | DEGRADED Exit and Freshness Semantics Not Defined | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN (interpretation implemented in LOT 3) |
 
-**Total:** 10 findings, all OPEN.  
+**Total:** 11 findings, all OPEN.  
 **Next review:** LOT 0 closure / architecture review board.

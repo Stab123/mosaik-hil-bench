@@ -38,8 +38,8 @@
 | 10 | REQ-FUNC-0009 | COMN exports logs to GSE | L4: svc_tm, L5: Companion_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | COMN node not implemented |
 | 10 | REQ-FUNC-0010 | Complete event timeline reconstruction | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | Requires blackbox + GSE |
 | 10 / 82 | REQ-SAFE-0002 / REQ-SAF-001 | Split-brain detection & latch < 10 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (enter_safe) | TC-004 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Host receive path (0 ms sim); no hardware measurement |
-| 10 / 82 | REQ-SAFE-0003 / REQ-SAF-002 | SAFE irreversible without ground arbitration | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE latch) | TC-004, TC-005 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Software latch only; no PGA discretes (ADD-F009) |
-| 10 / 82 | REQ-SAFE-0004 / REQ-SAF-003 | DEGRADED on peer SAFE | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE msg handler) | TC-004 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | State transition implemented |
+| 10 / 82 | REQ-SAFE-0003 / REQ-SAF-002 | SAFE irreversible without ground arbitration | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE latch, receive and service gates) | TC-004, TC-005; TC-035–TC-037, TC-041 | LOT2A_LEADER_LEASE_REPORT.md; LOT3_FDIR_SAFE_REPORT.md §6 | 2A, 3 | IMPLEMENTED-SIM | Software latch within one powered node instance; cold restart clears it; no PGA (ADD-F009) |
+| 10 / 82 | REQ-SAFE-0004 / REQ-SAF-003 | DEGRADED on peer SAFE | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE handler evidence, heartbeat/leader state decision, DEGRADED exit) | TC-039, TC-040 (first executable evidence); TC-045, TC-047, TC-048 | LOT3_FDIR_SAFE_REPORT.md §7–§10 | 3 | IMPLEMENTED-SIM | TC-004 asserts SAFE/split-brain only and is not evidence for this row; exit/freshness semantics are a host interpretation (ADD-F011) |
 | 10 / 82 | REQ-PERF-0001 / REQ-PERF-001 | Election completion < 1000 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-003 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Simulated time only |
 | 10 / 82 | REQ-PERF-0002 / REQ-PERF-002 | SAFE latch < 10 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-004 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Host receive path |
 | 10 | REQ-PERF-0003 | Heartbeat period 100 ms ± tolerance | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-001 | PROTOCOL.md §6 | 1 | IMPLEMENTED-SIM | Configured; not measured; derived: 10 Hz ±2% (ADD-F010) |
@@ -47,7 +47,7 @@
 | 10 | REQ-ENV-0001 | LEO thermal/vibration/radiation | L0-L6: all | NOT IMPLEMENTED | — | — | 13-14 | HARDWARE-REQUIRED | Flight hardware required; no environmental qualification (ADD-F005) |
 | 10 | REQ-IF-0001 | CAN-FD primary backbone ICD | L3: drv_canfd, L4: svc_mosaik_proto | `firmware/core/mosaik_proto.c/h` (frame format) | TC-006 | PROTOCOL.md | 1 | PARTIAL | Frame format defined; FD not validated (ADD-F004) |
 | 10 | REQ-IF-0002 | Ethernet secondary | L3: drv_eth | NOT IMPLEMENTED | — | — | 6 | DESIGN-ONLY | |
-| 10 | REQ-IF-0003 | Wired safety discretes | L3: drv_gpio, L5: Safety_Task | NOT IMPLEMENTED | — | — | 3, 11 | DESIGN-ONLY | Software SAFE only (ADD-F009) |
+| 10 | REQ-IF-0003 | Wired safety discretes | L3: drv_gpio, L5: Safety_Task | NOT IMPLEMENTED | — | — | 11 | DESIGN-ONLY | Software SAFE only (ADD-F009); LOT 3 documented the gap, no software substitute |
 | 10 | REQ-IF-0004 | 24V distributed power | L2: BSP power | NOT IMPLEMENTED | — | — | 13 | NOT-STARTED | |
 | 10 | REQ-LOG-0001 | Mode transitions logged | L4: svc_logger | NOT IMPLEMENTED | — | — | 7 | DESIGN-ONLY | |
 | 10 | REQ-LOG-0002 | Critical decisions logged w/ correlation_id | L4: svc_logger | NOT IMPLEMENTED | — | — | 7 | DESIGN-ONLY | correlation_id not yet in wire format (ADD-F007) |
@@ -93,7 +93,21 @@
 
 ---
 
-## 5. Evidence Classification Reference
+## 6. LOT 3 Specific Mapping (FDIR / SAFE)
+
+| ADD Ref | Feature | Implementation | Test | Evidence | Status | Limitation |
+|---------|---------|----------------|------|----------|--------|------------|
+| REQ-SAFE-0003 | SAFE contract: no authority, no participation, SAFE-only transmission, latch within one powered node instance | `mosaik_node.c`: `enter_safe()`, receive-path gate, service gate | TC-035–TC-038, TC-041 | LOT3_FDIR_SAFE_REPORT.md §6 | IMPLEMENTED-SIM | Cold restart clears SAFE; no PGA |
+| REQ-SAFE-0004 | DEGRADED from received peer SAFE evidence, freshness 3 heartbeat periods, evidence-based exit | `mosaik_node.c`: `last_safe_rx_ms[]`, `safe_evidence_mask`, `peer_safe_evidence_fresh()` | TC-039, TC-040, TC-045, TC-047, TC-048 | LOT3_FDIR_SAFE_REPORT.md §7–§10 | IMPLEMENTED-SIM | Host interpretation ADD-F011; locally received frames only |
+| REQ-FUNC-0004 / REQ-PERF-0001 | Recovery around a SAFE node; transient isolation recovery | unchanged election, lease and backoff paths | TC-035, TC-042, TC-046 | LOT3_FDIR_SAFE_REPORT.md §10 | IMPLEMENTED-SIM | Durations are host observations, not bounds |
+| REQ-FUNC-0002 | No authority without quorum; exhaustion terminal | unchanged `enter_safe()` NO_QUORUM path | TC-041, TC-044 | LOT3_FDIR_SAFE_REPORT.md §6 | IMPLEMENTED-SIM | Deterministic host model |
+| REQ-FUNC-0007 | Corrupted frames detected and counted only (PROTO_ERROR reserved) | `mosaik_proto.c` decoder, `decode_errors` | TC-043 | LOT3_FDIR_SAFE_REPORT.md §4 (D2) | PARTIAL | No PROTO_ERROR policy defined |
+| — | One vote per term across same-term role change (LOT 2 erratum) | `mosaik_node.c`: `become_follower()` no longer erases `voted_for` (commit `034db92`) | TC-050 | LOT3_FDIR_SAFE_REPORT.md §15–§16; LOT2D_CRASH_RECOVERY_REPORT.md addendum | IMPLEMENTED-SIM | Protocol invariant, no ADD requirement ID |
+| — | INV-LEADER-UNIQUE under SAFE, DEGRADED and adversarial traffic | max valid authorities observed 1 | TC-035–TC-050 | LOT3_FDIR_SAFE_REPORT.md §11 | CbD (sim) | At instrumented observation points |
+
+---
+
+## 7. Evidence Classification Reference
 
 | Code | Definition | Current Max Claim |
 |------|------------|-------------------|
@@ -109,7 +123,7 @@
 
 ---
 
-## 6. Mapping Maintenance Rules
+## 8. Mapping Maintenance Rules
 
 1. Every new implementation must add/update a row in this table
 2. Status changes require evidence reference

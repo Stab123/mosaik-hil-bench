@@ -1,7 +1,7 @@
 # MOSAÏK Development Roadmap
 
 **Document:** MOSAIK-ROADMAP-001  
-**Issue:** 1.1 — 16 September 2026  
+**Issue:** 1.2 — 16 September 2026  
 **Parent:** MOSAIK-ADD-0001 (Issue 1 / Rev 1, dated 24 April 2026)
 
 ---
@@ -25,7 +25,7 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 | **LOT 2B** | Stale/Delayed/Replayed Message Immunity | Message freshness, sequence numbers, replay protection | **IMPLEMENTED (host sim)** |
 | **LOT 2C** | Asymmetric Partitions, Loss, Delay, Reorder | Directional fault model (deliver/drop/delay/reorder), ACK-based lease evidence, TC-013–TC-020 | **IMPLEMENTED (host sim)** — no dedicated report yet |
 | **LOT 2D** | Crash/Restart/Recovery | Crash and cold-restart models, candidate retry backoff after split vote, TC-021–TC-034 | **IMPLEMENTED (host sim)** — persistent terms NOT implemented (cold restart only) |
-| **LOT 3** | FDIR and SAFE | Fault detection, isolation, recovery, SAFE mode behavior | NOT STARTED |
+| **LOT 3** | FDIR and SAFE | SAFE contract, DEGRADED from received peer SAFE evidence, recovery around a SAFE node, TC-035–TC-050; PROTO_ERROR policy, local fault input, SAFE_ASSERT and PGA deferred | **IMPLEMENTED (host sim)** |
 | **LOT 4** | MOSAÏK System Mode State Machine | INIT, NOMINAL, ADAPTIVE, DEGRADED, SAFE, PGA | NOT STARTED |
 | **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes | NOT STARTED |
 | **LOT 6** | CAN-FD / Communications / ICD | Physical layer, bitrates, ICD, bus-off handling | NOT STARTED |
@@ -92,17 +92,19 @@ All evidence in this repository uses these classifications:
 
 ---
 
-## 6. Current Baseline (LOT 2A through LOT 2D)
+## 6. Current Baseline (LOT 2A through LOT 3)
 
-**Verified commit:** `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea`  
+**Verified commit:** `7df0af01d6ae2120bce9a5c6378305e3ef7eeb5c`  
 **Branch:** `lot2c-network-adversarial`  
-**Tests:** 34 test cases (TC-001 through TC-034)  
-**Checks:** 205 checks, 0 failures  
+**Tests:** 50 test cases (TC-001 through TC-050)  
+**Checks:** 360 checks, 0 failures  
 **Compiler:** `-std=c99 -Wall -Wextra -Werror -O1` PASS  
 **Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS, 0 findings  
 **Invariants:** maximum concurrent valid authorities 1; term regressions 0  
-**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md`.  
-**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4.
+**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0; `76f10d9` LOT 2 closure; `af5da87` LOT 3 RED baseline 360 checks / 13 failed checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048, TC-050; `034db92` LOT 2 same-term vote-memory erratum corrected, TC-050 green; `7df0af0` DEGRADED evidence semantics, 360 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md` and `LOT3_FDIR_SAFE_REPORT.md`.  
+**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4; SAFE latched within one powered node instance only (cleared by cold restart); PROTO_ERROR reserved, not implemented; no PGA, discretes, watchdog or hardware FDIR.
+
+Previous baseline (LOT 2A through LOT 2D): commit `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea`, 34 test cases, 205 checks, 0 failures.
 
 Previous baseline (LOT 2A + LOT 2B): commit `806646a0a17803e70fff7bc65b6bf45eee43e6f2`, branch `lot2b-stale-replay-immunity`, 12 test cases, 55 checks, 0 failures.
 
@@ -150,7 +152,8 @@ Previous baseline (LOT 2A + LOT 2B): commit `806646a0a17803e70fff7bc65b6bf45eee4
 | ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | Ongoing |
 | ADD-F007 | Correlation_ID in Critical Messages | IMPLEMENTATION-GAP | LOT 6 |
 | ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | LOT 8 |
-| ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | LOT 3, 8 |
+| ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | LOT 8 (LOT 3 closed with the software latch documented; PGA not implemented) |
+| ADD-F011 | DEGRADED Exit / Freshness Semantics | ADD-INTERNAL, IMPLEMENTATION-GAP | Host interpretation implemented in LOT 3; architecture review |
 | ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | Architecture review / LOT 6 |
 
 **No blocking findings for LOT 1 start.**

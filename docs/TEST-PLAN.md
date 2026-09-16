@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.4 — 16 September 2026
+**Issue:** 0.5 — 16 September 2026
 
 ## 1. Two levels of verification
 
@@ -55,11 +55,30 @@ the traces are committed under `results/`.
 | TC-032 | Permanent retry contention keeps SAFE contract (backoff span 1) | REQ-003, Lot 2D | pass |
 | TC-033 | Asymmetric partition during retry, no authority without quorum | REQ-002, REQ-003, Lot 2D | pass |
 | TC-034 | Stale delayed election traffic during retry | REQ-002, Lot 2B, Lot 2D | pass |
+| TC-035 | SAFE node: no authority, SAFE-only transmission, cluster recovers around it | REQ-003, REQ-004, Lot 3 | pass |
+| TC-036 | SAFE node grants no vote, sends no ACK, never becomes candidate | REQ-003, Lot 3 | pass |
+| TC-037 | SAFE latch against old/same/higher-term traffic, grants, replays, connectivity | REQ-003, Lot 3 | pass |
+| TC-038 | SAFE frames do not propagate SAFE to healthy peers | REQ-002, Lot 3 | pass |
+| TC-039 | DEGRADED persists while peer SAFE evidence is fresh, no flapping | REQ-SAFE-0004, Lot 3 | pass (RED at `af5da87`) |
+| TC-040 | SAFE evidence expiry, return to NOMINAL, SAFE node recovers only by cold restart | REQ-SAFE-0004, Lot 3 | pass (RED at `af5da87`) |
+| TC-041 | Election exhaustion terminal even after connectivity returns | REQ-003, Lot 3 | pass |
+| TC-042 | Leader isolation boundary 600–2000 ms with recovered predicate | REQ-004, Lot 3 | pass |
+| TC-043 | Malformed frames: decode errors counted, no state change (PROTO_ERROR reserved) | REQ-FUNC-0007, Lot 3 | pass |
+| TC-044 | Survivor crash during collision recovery, lone node SAFE/no-quorum | REQ-003, Lot 3 | pass |
+| TC-045 | Replayed SAFE evidence: bounded DEGRADED window, local evidence only | REQ-SAFE-0004, Lot 3 | pass (RED at `af5da87`) |
+| TC-046 | Three transient leader isolations recover without SAFE | REQ-004, Lot 3 | pass |
+| TC-047 | Leader SAFE + stale heartbeat replay + one-way drop during election | REQ-SAFE-0004, REQ-002, Lot 3 | pass (RED at `af5da87`) |
+| TC-048 | Leader crash + natural collision + delayed SAFE frame during backoff | REQ-SAFE-0004, REQ-004, Lot 3 | pass (RED at `af5da87`) |
+| TC-049 | Deterministic reproducibility of the SAFE/DEGRADED scenario | — | pass |
+| TC-050 | One vote per term across a same-term step-down (LOT 2 erratum) | — (protocol invariant), Lot 3 | pass (RED at `af5da87`, green at `034db92`) |
 
-Current total at commit `f4e0f3c`: 205 checks, 0 failures, sanitizer clean.
-TC-031 was added RED at commit `d38985d` (6 failing checks) before the
-Lot 2D protocol correction and passes since `f4e0f3c`; see
-`LOT2D_CRASH_RECOVERY_REPORT.md`.
+Current total at commit `7df0af0`: 50 tests, 360 checks, 0 failures,
+sanitizer clean. RED-before-fix evidence is preserved in history:
+TC-031 was added RED at `d38985d` (6 failing checks) and passes since
+`f4e0f3c` (LOT 2D); TC-035–TC-050 were added at `af5da87` with 13 failing
+checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048 and TC-050; TC-050
+passes since `034db92` and the five DEGRADED tests since `7df0af0`. See
+`LOT2D_CRASH_RECOVERY_REPORT.md` and `LOT3_FDIR_SAFE_REPORT.md`.
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.
@@ -125,4 +144,11 @@ reported, not discarded.
   (TC-028: 628 ms, TC-031: 680 ms) are deterministic host-model values, not
   a worst-case bound. A split vote remains possible; sub-millisecond bus
   races are not modelled.**
+- **Lot 3 SAFE and DEGRADED are protocol-core semantics on the virtual bus.
+  SAFE is latched within one powered node instance and cleared by a cold
+  restart because persistence is not implemented; PGA is not implemented.
+  DEGRADED is derived only from SAFE frames actually received; the harness
+  observes states and transmissions but supplies no evidence to any node.
+  PROTO_ERROR is reserved and never raised. TC-042 isolation durations are
+  deterministic host observations, not timing bounds.**
 - **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**

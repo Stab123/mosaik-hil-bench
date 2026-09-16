@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.4 — 16 September 2026
+**Issue:** 0.5 — 16 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -46,6 +46,14 @@ carrying no payload functions.
   persistence exists. Candidate retries after a failed election use a
   randomised local backoff; a split vote remains possible, only its
   indefinite persistence is addressed. Host software demonstrator only.**
+- **FDIR and SAFE (Lot 3): SAFE is latched for the lifetime of one powered
+  node instance; a cold restart clears it because no persistence exists.
+  DEGRADED is a cluster-awareness state derived only from SAFE frames
+  actually received from peers and does not revoke leadership authority.
+  Cause code 3 (protocol error) is reserved and not implemented: malformed
+  frames are counted and never cause SAFE. No ground arbitration, safety
+  discrete, watchdog or local fault input exists. Host software
+  demonstrator only — no hardware validation.**
 
 ## 3. Physical layer
 
@@ -96,7 +104,11 @@ A receiver rejects a frame whose identifier is unknown, whose DLC is not 8,
 whose version byte does not match, whose CRC fails, whose source id is out of
 range, or whose source id disagrees with the identifier.
 
-SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error.
+SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error. Code 3 is
+RESERVED / NOT IMPLEMENTED in the current host demonstrator: a receiver
+counts malformed frames in `decode_errors` and never enters SAFE because of
+them. No threshold, window or recovery semantics are defined by the
+available normative transcription (Lot 3, decision D2).
 
 ## 6. Timing parameters
 
@@ -112,6 +124,7 @@ SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error.
 | **Stale message rejection** | **immediate (in receive path)** | **Lot 2B** |
 | **Lease evidence freshness** | **100 ms (received current-term ACK)** | **Lot 2C** |
 | **Candidate retry backoff** | **0–49 ms, randomised per node (span 50)** | **Lot 2D** |
+| **Peer SAFE evidence freshness** | **3 heartbeat periods (300 ms), derived, not configurable** | **Lot 3** |
 
 The election timeout and the candidate retry backoff are drawn from a
 per-node deterministic xorshift sequence seeded by node id, so that
@@ -204,7 +217,10 @@ for test instrumentation.
 **Single-leader invariant (REQ-002).** A node grants at most one vote per term.
 A node observing any message with a higher term adopts it and steps down. These
 two rules together make two leaders in the same term impossible under the
-assumed fault model. The leadership lease further ensures that even under a
+assumed fault model. Vote memory (`voted_for`, `voted_term`) is never erased
+by a role change within the same term; only a strictly higher term makes a
+node eligible to vote again, because `voted_term` then differs (LOT 2
+erratum corrected in Lot 3, TC-050). The leadership lease further ensures that even under a
 2+1 network partition, at most one node holds valid leadership authority at
 any time (INV-LEADER-UNIQUE). Stale/replay rejection ensures that delayed or
 replayed traffic cannot create a second valid authority.
@@ -214,8 +230,31 @@ heartbeat from another node claiming leadership in the same term, the invariant
 has been violated. The node latches SAFE immediately, inside the receive path,
 and announces the cause on the bus. It does not attempt to arbitrate.
 
-**Degraded operation.** A node that observes a peer in SAFE moves from NOMINAL
-to DEGRADED while continuing to operate.
+**SAFE contract (Lot 3).** A SAFE node holds the follower role, never has
+valid leadership authority, never becomes candidate or leader, grants no
+vote, sends no acknowledgement, transmits SAFE announcements only (one per
+heartbeat period, carrying the cause), and ignores every received frame
+before any term processing. Old-, same- or higher-term traffic, grants,
+SAFE replays and restored connectivity cannot clear SAFE. SAFE is latched
+for the lifetime of one powered node instance; a cold restart creates a new
+volatile instance and therefore clears it, since persistence is not
+implemented. SAFE is not propagated: a received SAFE frame never moves a
+peer into SAFE. Two SAFE nodes leave the third without quorum, which then
+latches SAFE through election exhaustion.
+
+**Degraded operation (Lot 3).** A node records, per peer, the local time of
+the latest SAFE frame actually received from that peer. That evidence is
+fresh for three heartbeat periods. A received SAFE frame moves NOMINAL to
+DEGRADED. While any peer evidence is fresh the node remains DEGRADED: an
+accepted heartbeat or becoming leader keeps it DEGRADED. DEGRADED does not
+revoke leadership authority and does not change quorum or voting; a leader
+may be DEGRADED while holding valid authority. Once no evidence is fresh,
+the node returns to NOMINAL only with legitimate local leader evidence: a
+leader with valid authority, or a follower that knows its leader and whose
+heartbeat deadline still lies in the future. A candidate, or a follower in
+retry backoff, does not return to NOMINAL. A dropped SAFE frame is absence
+of local evidence; no remote state is inferred from anything but received
+frames.
 
 **Crash and restart (Lot 2D).** A crashed node transmits, receives and
 services nothing. A restarted node starts from term 0 with no vote and no
@@ -242,5 +281,6 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 | **Lot 2B: stale/replay immunity** | **7** | **TC-008, TC-009, TC-010, TC-011, TC-012** |
 | **Lot 2C: directional faults and authority evidence** | **6, 7** | **TC-013 to TC-020** |
 | **Lot 2D: crash, restart, candidate retry backoff** | **7** | **TC-021 to TC-034** |
+| **Lot 3: SAFE contract, DEGRADED evidence, recovery around SAFE, one-vote erratum** | **5, 7** | **TC-035 to TC-050** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.

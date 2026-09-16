@@ -45,7 +45,7 @@
 | **POWER_EN** | CN → Each node | Active-high, per-node | Power enable from CN |
 | **LEADER_ASSERT** | CN → COMN, GSE | Active-high | Indicates valid leadership authority |
 
-**Discrepancy note:** Current host demonstrator implements SAFE latching in software only. No physical discretes. See ADD-F003.
+**Discrepancy note:** Current host demonstrator implements SAFE latching in software only, within one powered node instance. No physical discretes, no software substitute for them (LOT 3 decision D3/D7; LOT 11). See ADD-F003.
 
 ---
 
@@ -73,6 +73,8 @@
 | **Lease** | 500 ms nominal, renewed only on acknowledgements actually received from a quorum of peers in the current term (Lot 2C, host model); outbound heartbeat delivery alone never renews |
 | **Quorum** | Majority of cluster (4 of 6 for full; 2 of 3 for bench subset) |
 | **Split-brain** | Two nodes claiming leadership in same term → immediate SAFE |
+| **SAFE (host)** | Latched for the lifetime of one powered node instance; follower role, no authority, no participation, SAFE announcements only; cold restart clears it (no persistence); no PGA (Lot 3) |
+| **DEGRADED (host)** | Cluster-awareness state held while a peer's SAFE frame actually received is fresh (3 heartbeat periods); does not revoke authority (Lot 3, ADD-F011) |
 
 ---
 
@@ -83,7 +85,7 @@
 | Nodes | 6 (3 EN, CN, COMN, GSE) | 3 generic coordination nodes | 3 EN, CN, COMN, GSE missing |
 | CAN-FD | 500k/2M bit/s, FD frames | Classical CAN 2.0B, 500k arbitration | FD data phase, bitrate |
 | Ethernet | Secondary backbone | Not implemented | LOT 6 |
-| Safety discretes | 5 wired signals | Software-only SAFE latch | LOT 3, 11 |
+| Safety discretes | 5 wired signals | Software-only SAFE latch (LOT 3 SAFE contract; no software discrete substitute) | LOT 11 |
 | Power control | 24V distributed with enables | Not implemented | LOT 13 |
 | System modes | 6 (INIT, NOM, ADAP, DEG, SAFE, PGA) | 4 (INIT, NOM, DEG, SAFE) | ADAPTIVE, PGA missing |
 | Leadership lease | 500 ms (target) | 500 ms (simulated) | LOT 2A host only |
@@ -143,7 +145,7 @@ Safety Discretes (wired, parallel to CAN):
 | INIT | MOSAIK_STATE_INIT | MATCH |
 | NOMINAL | MOSAIK_STATE_NOMINAL | MATCH |
 | ADAPTIVE | (not implemented) | GAP |
-| DEGRADED | MOSAIK_STATE_DEGRADED | MATCH |
+| DEGRADED | MOSAIK_STATE_DEGRADED | MATCH (host exit/freshness semantics are an interpretation, ADD-F011) |
 | SAFE | MOSAIK_STATE_SAFE | MATCH |
 | PGA | (not implemented) | GAP |
 | Leader | MOSAIK_ROLE_LEADER | MATCH |

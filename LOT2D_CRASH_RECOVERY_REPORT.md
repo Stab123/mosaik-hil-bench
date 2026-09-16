@@ -5,6 +5,7 @@
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 **Branch:** `lot2c-network-adversarial`
 **Validated commit:** `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea`
+**Addendum E1 (16 September 2026):** see the end of this report for a LOT 2 erratum discovered and corrected during LOT 3.
 
 **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. Do not claim TRL 4.**
 
@@ -483,3 +484,31 @@ deterministic host model. These two measurements are not a universal or
 hardware worst-case guarantee.
 
 Evidence classification for every item in this report: IMPLEMENTED-SIM.
+
+---
+
+## Addendum E1 — LOT 2 erratum: same-term vote memory after lease-expiry demotion
+
+Discovered by LOT 3 adversarial testing, after this report was issued. The
+historical LOT 2 evidence above is not rewritten; LOT 2 did not test this
+case.
+
+- Defect: `become_follower()` erased `voted_for` while preserving
+  `voted_term`. The lease-expiry path called it with the node's own term, so
+  a leader demoted in the SAME term lost its recorded vote, and the one-vote
+  check, keyed on `voted_term == msg.term && voted_for != 0`, then admitted a
+  second vote in that term.
+- RED evidence: TC-050 at commit `af5da87`, reproduced through legitimate
+  events only (ACK return paths dropped by the network model, lease expiry
+  at 2417 ms, vote memory (2,1) before and (0,1) after the demotion, a
+  same-term VOTE_REQ delivered through the bus, VOTE_GRANT emitted).
+- Correction: commit `034db92`, "fix: preserve vote memory across same-term
+  demotion". Vote memory is preserved across same-term role changes.
+  Voting in a strictly higher term remains allowed because `voted_term`
+  differs; TC-050's contrast phase shows the higher-term grant.
+- Regression control: TC-001 to TC-034 output remained byte-identical
+  across the correction; sanitizers clean.
+- Concurrent double authority was NOT observed and is not reachable with
+  the current 500 ms lease and 150 ms vote timeout; the defect was a
+  violation of the documented rule in state. See
+  `LOT3_FDIR_SAFE_REPORT.md` sections 15 and 16.
