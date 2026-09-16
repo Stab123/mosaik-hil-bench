@@ -74,7 +74,10 @@ typedef struct {
     mosaik_state_t   state;
     uint16_t         term;
 
-    uint8_t          voted_for;   /* 0 = no vote cast in voted_term */
+    uint8_t          voted_for;   /* node voted for in voted_term; 0 = none.
+                                    * Never erased by a role change: a vote is
+                                    * recorded once per term. Any term other
+                                    * than voted_term has no vote yet. */
     uint16_t         voted_term;
     uint8_t          vote_mask;   /* bit (n-1) set when node n granted */
 

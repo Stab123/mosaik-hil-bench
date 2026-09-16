@@ -125,7 +125,10 @@ static void become_follower(mosaik_node_t *n, uint16_t term)
 {
     n->role      = MOSAIK_ROLE_FOLLOWER;
     n->term      = term;
-    n->voted_for = 0u;
+    /* Vote memory (voted_for, voted_term) is deliberately NOT erased here.
+     * One vote per term must hold across role changes within the same term
+     * (LOT 2 erratum, TC-050). Eligibility to vote in a strictly higher term
+     * follows from voted_term differing from that term. */
     n->vote_mask = 0u;
     n->deadline_ms = n->now_ms + election_timeout(n);
 }
