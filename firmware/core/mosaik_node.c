@@ -121,6 +121,23 @@ static mosaik_reject_reason_t check_heartbeat_stale(const mosaik_node_t *n,
     return MOSAIK_REJECT_NONE;
 }
 
+/* Lot 3: true while at least one SAFE frame actually received from a peer is
+ * still fresh. The window is derived from the heartbeat period (SAFE nodes
+ * re-announce every heartbeat period): 3 periods. Wrap-safe unsigned elapsed
+ * time. Uses only local state and the local clock. */
+static bool peer_safe_evidence_fresh(const mosaik_node_t *n)
+{
+    uint32_t window = 3u * (uint32_t)n->cfg.heartbeat_period_ms;
+    uint8_t i;
+    for (i = 0u; i < 4u; i++) {
+        if ((n->safe_evidence_mask & (uint8_t)(1u << i)) != 0u &&
+            (uint32_t)(n->now_ms - n->last_safe_rx_ms[i]) < window) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void become_follower(mosaik_node_t *n, uint16_t term)
 {
     n->role      = MOSAIK_ROLE_FOLLOWER;
@@ -152,7 +169,10 @@ static void become_leader(mosaik_node_t *n)
 {
     n->role                     = MOSAIK_ROLE_LEADER;
     n->leader_id                = n->id;
-    n->state                    = MOSAIK_STATE_NOMINAL;
+    /* Lot 3: a leader stays DEGRADED while received peer SAFE evidence is
+     * fresh. Authority is unaffected by DEGRADED. */
+    n->state                    = peer_safe_evidence_fresh(n) ? MOSAIK_STATE_DEGRADED
+                                                              : MOSAIK_STATE_NOMINAL;
     n->failed_elections         = 0u;
     n->became_leader_ms         = n->now_ms;
     n->last_quorum_contact_ms   = n->now_ms;
@@ -195,7 +215,9 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
         node->last_hb_term[i] = 0u;
         node->last_ack_seq[i] = 0u;
         node->last_ack_term[i] = 0u;
+        node->last_safe_rx_ms[i] = 0u;
     }
+    node->safe_evidence_mask = 0u;
     node->tx = tx;
     node->user = user;
     node->deadline_ms = now_ms + election_timeout(node);
@@ -265,7 +287,10 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         }
         node->role             = MOSAIK_ROLE_FOLLOWER;
         node->leader_id        = msg.src;
-        node->state            = MOSAIK_STATE_NOMINAL;
+        /* Lot 3: an accepted heartbeat does not clear DEGRADED while received
+         * peer SAFE evidence is fresh (REQ-SAFE-0004). */
+        node->state            = peer_safe_evidence_fresh(node) ? MOSAIK_STATE_DEGRADED
+                                                                : MOSAIK_STATE_NOMINAL;
         node->failed_elections = 0u;
         node->last_hb_rx_ms    = now_ms;
         /* Track last seen heartbeat sequence and term per source for
@@ -341,7 +366,16 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         }
         break;
     case MOSAIK_MSG_SAFE:
-        /* A peer has latched SAFE. The cluster continues degraded. */
+        /* A peer has latched SAFE. The cluster continues degraded.
+         * Lot 3: record per-peer SAFE evidence from the received frame only.
+         * Own frames were already discarded above; the source id was
+         * validated by the decoder, and is range-checked again here before
+         * indexing. SAFE is never propagated: no role, term, vote, authority
+         * or lease change happens here. */
+        if (msg.src != 0u && msg.src <= MOSAIK_MAX_NODES && msg.src != node->id) {
+            node->last_safe_rx_ms[msg.src - 1u] = now_ms;
+            node->safe_evidence_mask |= (uint8_t)(1u << (msg.src - 1u));
+        }
         if (node->state == MOSAIK_STATE_NOMINAL) {
             node->state = MOSAIK_STATE_DEGRADED;
         }
@@ -361,6 +395,26 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
             emit(node, MOSAIK_MSG_SAFE, node->safe_cause);
         }
         return;
+    }
+
+    /* Lot 3: DEGRADED exit. Return to NOMINAL only when no received peer SAFE
+     * evidence is fresh AND legitimate leader evidence exists locally: a
+     * leader with valid authority, or a follower that knows its leader and
+     * whose heartbeat deadline still lies in the future. A candidate, or a
+     * follower in retry backoff (leader_id == 0), never clears DEGRADED here.
+     * This touches state only; lease, election and backoff timing below are
+     * unchanged. */
+    if (node->state == MOSAIK_STATE_DEGRADED && !peer_safe_evidence_fresh(node)) {
+        bool leader_evidence = false;
+        if (node->role == MOSAIK_ROLE_LEADER) {
+            leader_evidence = mosaik_has_valid_leadership_authority(node);
+        } else if (node->role == MOSAIK_ROLE_FOLLOWER) {
+            leader_evidence = (node->leader_id != 0u) &&
+                              ((int32_t)(now_ms - node->deadline_ms) < 0);
+        }
+        if (leader_evidence) {
+            node->state = MOSAIK_STATE_NOMINAL;
+        }
     }
 
     if (node->role == MOSAIK_ROLE_LEADER) {

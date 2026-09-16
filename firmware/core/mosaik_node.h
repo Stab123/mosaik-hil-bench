@@ -102,6 +102,13 @@ typedef struct {
     uint8_t          last_ack_seq[4];        /* last seen ACK seq per src (1..3) */
     uint16_t         last_ack_term[4];       /* last seen ACK term per src */
 
+    /* Peer SAFE evidence (Lot 3). Bit (src-1) of the mask is set once at least
+     * one SAFE frame has actually been received from that peer;
+     * last_safe_rx_ms[src-1] is the local time of the latest one. Evidence is
+     * fresh while (now_ms - last_safe_rx_ms) < 3 * heartbeat_period_ms. */
+    uint32_t         last_safe_rx_ms[4];
+    uint8_t          safe_evidence_mask;
+
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;
     uint32_t         safe_entry_ms;
