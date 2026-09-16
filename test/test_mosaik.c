@@ -303,11 +303,12 @@ static void bus_heal_partition(void)
     bus_set_full_connectivity();
 }
 
-static void bus_init(void)
+/* Initialise the bus with an explicit node configuration. Used by tests
+ * that exercise a documented configuration parameter; identical to
+ * bus_init() otherwise. */
+static void bus_init_with_cfg(const mosaik_config_t *cfg)
 {
-    mosaik_config_t cfg;
     int i;
-    mosaik_config_default(&cfg);
     memset(&g_bus, 0, sizeof(g_bus));
     for (i = 0; i < N_NODES; i++) {
         g_bus.powered[i] = true;
@@ -315,9 +316,16 @@ static void bus_init(void)
     }
     bus_set_full_connectivity();
     for (i = 0; i < N_NODES; i++) {
-        mosaik_init(&g_bus.node[i], (uint8_t)(i + 1), &cfg,
+        mosaik_init(&g_bus.node[i], (uint8_t)(i + 1), cfg,
                     bus_tx, (void *)(uintptr_t)(i + 1), 0u);
     }
+}
+
+static void bus_init(void)
+{
+    mosaik_config_t cfg;
+    mosaik_config_default(&cfg);
+    bus_init_with_cfg(&cfg);
 }
 
 /* Lot 2D: Crash a node - it stops transmitting and processing.
@@ -2183,6 +2191,362 @@ static void tc_030_recovery_asymmetric_network(void)
            victim_idx + 1, leader_idx + 1, g_bus.node[leader_idx].term);
 }
 
+/* ---------------------------------------------------------------------
+ * LOT 2D - candidate retry backoff (C2-a) evidence tests, TC-031..TC-034.
+ *
+ * Rules honoured by these tests:
+ *  - no protocol internal (deadline_ms, rng, term, voted_for, ...) is ever
+ *    WRITTEN from the harness; node state is only read;
+ *  - a collision is produced by crashing the leader at a naturally occurring
+ *    instant at which both followers already hold the same deadline, found
+ *    by read-only observation of normal protocol execution with the real
+ *    per-node seeds;
+ *  - adversarial behaviour uses only the existing directional network model
+ *    (drop / delay) and the delayed-frame scheduler.
+ * ------------------------------------------------------------------- */
+
+/* Step the bus until both followers of leader_idx hold the same deadline
+ * that still lies in the future. Read-only: nothing is written to any node.
+ * Returns the shared deadline, or 0 if none occurs within max_ms. */
+static uint32_t bus_wait_equal_follower_deadlines(int leader_idx, uint32_t max_ms)
+{
+    uint32_t k;
+    for (k = 0; k < max_ms; k++) {
+        int a = -1, b = -1, i;
+        bus_step();
+        for (i = 0; i < N_NODES; i++) {
+            if (i == leader_idx) { continue; }
+            if (a < 0) { a = i; } else { b = i; }
+        }
+        if (leader_index() == leader_idx &&
+            g_bus.node[a].role == MOSAIK_ROLE_FOLLOWER &&
+            g_bus.node[b].role == MOSAIK_ROLE_FOLLOWER &&
+            g_bus.node[a].deadline_ms == g_bus.node[b].deadline_ms &&
+            (int32_t)(g_bus.node[a].deadline_ms - g_bus.now_ms) > 0) {
+            return g_bus.node[a].deadline_ms;
+        }
+    }
+    return 0u;
+}
+
+/* Read-only per-step observation of the two survivors after a leader crash. */
+typedef struct {
+    int      leader_idx;             /* crashed leader, excluded */
+    uint32_t max_valid;              /* INV-LEADER-UNIQUE evidence */
+    uint8_t  max_failed[N_NODES];    /* highest failed_elections seen per node */
+    uint16_t last_term[N_NODES];
+    uint32_t term_regressions;
+    bool     split_vote_seen;        /* both survivors candidates, same term, self-voted */
+    uint16_t split_vote_term;
+    bool     retry_desync_seen;      /* after >=1 failure each: deadlines differ */
+    bool     retry_sync_only;        /* every observed post-failure pair was equal */
+    uint16_t valid_leader_term;      /* term of the first valid authority seen, 0 if none */
+} crash_obs_t;
+
+static void obs_init(crash_obs_t *o, int leader_idx)
+{
+    int i;
+    memset(o, 0, sizeof(*o));
+    o->leader_idx = leader_idx;
+    o->retry_sync_only = true;
+    for (i = 0; i < N_NODES; i++) { o->last_term[i] = g_bus.node[i].term; }
+}
+
+static void obs_step(crash_obs_t *o)
+{
+    int a = -1, b = -1, i;
+    uint32_t v = (uint32_t)valid_leader_count();
+    const mosaik_node_t *na, *nb;
+
+    if (v > o->max_valid) { o->max_valid = v; }
+    if (v == 1u && o->valid_leader_term == 0u) {
+        o->valid_leader_term = g_bus.node[valid_leader_index()].term;
+    }
+    for (i = 0; i < N_NODES; i++) {
+        if (i == o->leader_idx || g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (g_bus.node[i].failed_elections > o->max_failed[i]) {
+            o->max_failed[i] = g_bus.node[i].failed_elections;
+        }
+        if (g_bus.node[i].term < o->last_term[i]) { o->term_regressions++; }
+        o->last_term[i] = g_bus.node[i].term;
+        if (a < 0) { a = i; } else { b = i; }
+    }
+    if (a < 0 || b < 0) { return; }
+    na = &g_bus.node[a];
+    nb = &g_bus.node[b];
+    if (na->role == MOSAIK_ROLE_CANDIDATE && nb->role == MOSAIK_ROLE_CANDIDATE &&
+        na->term == nb->term && na->voted_for == na->id && nb->voted_for == nb->id) {
+        if (!o->split_vote_seen) { o->split_vote_term = na->term; }
+        o->split_vote_seen = true;
+    }
+    if (na->failed_elections >= 1u && nb->failed_elections >= 1u &&
+        na->state != MOSAIK_STATE_SAFE && nb->state != MOSAIK_STATE_SAFE &&
+        na->role != MOSAIK_ROLE_LEADER && nb->role != MOSAIK_ROLE_LEADER) {
+        if (na->deadline_ms != nb->deadline_ms) {
+            o->retry_desync_seen = true;
+            o->retry_sync_only  = false;
+        }
+    }
+}
+
+/* Common prologue: elect a leader, find a natural shared follower deadline,
+ * crash the leader while it is active. Returns the crashed leader index or
+ * -1 (checks already recorded). */
+static int collision_prologue(const char *req, uint32_t *shared_deadline,
+                              uint32_t *crash_ms, uint16_t *term_before)
+{
+    int leader_idx;
+    bus_run(2000u);
+    leader_idx = leader_index();
+    check(leader_idx >= 0, req, "leader existed before the fault");
+    if (leader_idx < 0) { return -1; }
+    *term_before = g_bus.node[leader_idx].term;
+    *shared_deadline = bus_wait_equal_follower_deadlines(leader_idx, 20000u);
+    check(*shared_deadline != 0u, req,
+          "naturally equal follower deadlines observed (read-only, real seeds)");
+    if (*shared_deadline == 0u) { return -1; }
+    bus_crash_node(leader_idx);
+    *crash_ms = g_bus.now_ms;
+    return leader_idx;
+}
+
+/* TC-031: natural election collision, randomized retry recovery.
+ * Both followers receive the same heartbeat and, by RNG coincidence, draw
+ * the same jitter, so they hold the same deadline. The leader is crashed
+ * while that deadline is active. The split vote is therefore natural; the
+ * property under test is what happens AFTER it.
+ * EXPECTED ON BASELINE c6f600b: RED. Candidate retries use the fixed
+ * vote_timeout_ms with no fresh randomness, so both survivors retry in
+ * lock-step three times and latch SAFE/NO_QUORUM. After C2-a: PASS. */
+static void tc_031_natural_collision_recovery(void)
+{
+    int leader_idx, li, i;
+    uint32_t shared_deadline = 0u, crash_ms = 0u, elected_ms = 0u, k;
+    uint16_t term_before = 0u;
+    crash_obs_t o;
+
+    printf("TC-031  natural election collision, randomized retry recovery [Lot 2D, REQ-004]\n");
+    bus_init();
+    leader_idx = collision_prologue("Lot 2D", &shared_deadline, &crash_ms, &term_before);
+    if (leader_idx < 0) { return; }
+    obs_init(&o, leader_idx);
+
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        obs_step(&o);
+        if (valid_leader_count() == 1) { elected_ms = g_bus.now_ms; break; }
+    }
+    li = valid_leader_index();
+
+    check(o.split_vote_seen, "Lot 2D",
+          "initial split vote occurred naturally (both candidates, same term, self-voted)");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "never more than one valid authority");
+    check(o.term_regressions == 0u, "Lot 2D", "no term regression on any survivor");
+    check(o.retry_desync_seen, "Lot 2D",
+          "retry deadlines desynchronized after the first failed election");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        check(o.max_failed[i] == 1u, "Lot 2D",
+              "survivor recorded exactly one failed election");
+        check(g_bus.node[i].state != MOSAIK_STATE_SAFE, "Lot 2D",
+              "survivor did not enter SAFE");
+    }
+    check(li >= 0, "REQ-004", "new valid leader elected after natural collision");
+    if (li >= 0) {
+        check(elected_ms - crash_ms < 1000u, "REQ-004",
+              "recovery within 1000 ms of leader loss despite one collision");
+        check(g_bus.node[li].term > term_before, "Lot 2D", "term advanced");
+    }
+    printf("        leader %d crashed at %u ms, shared follower deadline %u, collision term %u\n",
+           leader_idx + 1, crash_ms, shared_deadline, o.split_vote_term);
+    if (li >= 0) {
+        printf("        node %d valid leader at %u ms (%u ms after loss), term %u\n",
+               li + 1, elected_ms, elected_ms - crash_ms, g_bus.node[li].term);
+    } else {
+        for (i = 0; i < N_NODES; i++) {
+            if (i == leader_idx) { continue; }
+            printf("        survivor %d: state=%d failed_elections=%u term=%u (no leader)\n",
+                   i + 1, (int)g_bus.node[i].state, g_bus.node[i].failed_elections,
+                   g_bus.node[i].term);
+        }
+    }
+}
+
+/* TC-032: permanent retry contention keeps the SAFE contract.
+ * The randomized retry must not weaken SAFE when contention truly persists.
+ * On the baseline the candidate retry is a fixed vote_timeout_ms, so every
+ * retry after a natural collision is synchronized by construction and this
+ * test is GREEN on c6f600b.
+ * PHASE 2 (after C2-a is implemented): enable the line marked below so the
+ * candidate retry backoff span is 1 ms, i.e. zero effective desynchronization.
+ * Without that line the scenario degenerates into TC-031 and the SAFE
+ * assertions here turn RED, which is the intended signal to enable it. The
+ * configuration is NOT faked here: the field does not exist yet. */
+static void tc_032_permanent_contention_safe_contract(void)
+{
+    mosaik_config_t cfg;
+    int leader_idx, i;
+    uint32_t shared_deadline = 0u, crash_ms = 0u, k;
+    uint16_t term_before = 0u;
+    uint32_t safe_ms[N_NODES] = {0u, 0u, 0u};
+    crash_obs_t o;
+
+    printf("TC-032  permanent retry contention keeps SAFE contract [Lot 2D]\n");
+    mosaik_config_default(&cfg);
+    /* PHASE 2: cfg.candidate_retry_backoff_span_ms = 1u; */
+    bus_init_with_cfg(&cfg);
+    leader_idx = collision_prologue("Lot 2D", &shared_deadline, &crash_ms, &term_before);
+    if (leader_idx < 0) { return; }
+    obs_init(&o, leader_idx);
+
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        obs_step(&o);
+        for (i = 0; i < N_NODES; i++) {
+            if (i != leader_idx && safe_ms[i] == 0u &&
+                g_bus.node[i].state == MOSAIK_STATE_SAFE) {
+                safe_ms[i] = g_bus.node[i].safe_entry_ms;
+            }
+        }
+    }
+
+    check(o.split_vote_seen, "Lot 2D", "initial split vote occurred naturally");
+    check(o.retry_sync_only, "Lot 2D", "retries remained synchronized (no effective backoff)");
+    check(o.max_valid == 0u, "Lot 2D", "no authority manufactured under permanent contention");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        check(o.max_failed[i] == cfg.max_failed_elections, "Lot 2D",
+              "exactly max_failed_elections genuine failed vote timeouts");
+        check(g_bus.node[i].state == MOSAIK_STATE_SAFE &&
+              g_bus.node[i].safe_cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM, "Lot 2D",
+              "survivor latched SAFE with cause no-quorum");
+    }
+    printf("        leader %d crashed at %u ms, shared deadline %u, SAFE at",
+           leader_idx + 1, crash_ms, shared_deadline);
+    for (i = 0; i < N_NODES; i++) {
+        if (i != leader_idx) { printf(" node%d=%u", i + 1, safe_ms[i]); }
+    }
+    printf("\n");
+}
+
+/* TC-033: asymmetric partition during retry.
+ * After a natural collision, one direction between the two survivors is cut
+ * with the existing directional network model, so neither can ever assemble
+ * a quorum. Randomized retry must not manufacture authority; both must end
+ * in SAFE/NO_QUORUM after max_failed_elections. GREEN before and after. */
+static void tc_033_asymmetric_partition_during_retry(void)
+{
+    int leader_idx, a = -1, b = -1, i;
+    uint32_t shared_deadline = 0u, crash_ms = 0u, k;
+    uint16_t term_before = 0u;
+    crash_obs_t o;
+
+    printf("TC-033  asymmetric partition during retry [Lot 2D, INV-LEADER-UNIQUE]\n");
+    bus_init();
+    leader_idx = collision_prologue("Lot 2D", &shared_deadline, &crash_ms, &term_before);
+    if (leader_idx < 0) { return; }
+    obs_init(&o, leader_idx);
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        if (a < 0) { a = i; } else { b = i; }
+    }
+
+    /* Let the natural collision happen first. */
+    for (k = 0; k < 1000u && !o.split_vote_seen; k++) { bus_step(); obs_step(&o); }
+    check(o.split_vote_seen, "Lot 2D", "initial split vote occurred naturally");
+    if (!o.split_vote_seen) { return; }
+
+    /* Cut a -> b for the rest of the test: b never receives a's VOTE_REQ or
+     * VOTE_GRANT, so no survivor can ever collect a second vote. */
+    bus_set_net_action((uint8_t)a, (uint8_t)b, NET_DROP, 0u);
+
+    for (k = 0; k < 5000u; k++) { bus_step(); obs_step(&o); }
+
+    check(o.max_valid == 0u, "Lot 2D", "no leader without an actually received quorum vote");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "Lot 2D", "no term regression");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        check(g_bus.node[i].state == MOSAIK_STATE_SAFE &&
+              g_bus.node[i].safe_cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM, "Lot 2D",
+              "survivor latched SAFE/no-quorum after max_failed_elections");
+        check(o.max_failed[i] == g_bus.node[i].cfg.max_failed_elections, "Lot 2D",
+              "SAFE reached only through genuine failed vote timeouts");
+    }
+    printf("        collision term %u, path %d->%d dropped, survivors terms %u/%u\n",
+           o.split_vote_term, a + 1, b + 1, g_bus.node[a].term, g_bus.node[b].term);
+}
+
+/* TC-034: stale delayed election traffic during collision/retry.
+ * At the collision instant the real term-t VOTE_REQ from survivor a to b is
+ * delayed 320 ms by the directional network model, and a replayed term-t
+ * VOTE_GRANT (a -> b) is scheduled with the same delay, so both arrive after
+ * b has advanced beyond term t. Stale traffic must not regress the term,
+ * must not produce authority, and must not disturb the retry/SAFE rules.
+ * GREEN before and after. */
+static void tc_034_stale_delayed_election_traffic(void)
+{
+    int leader_idx, a = -1, b = -1, i;
+    uint32_t shared_deadline = 0u, crash_ms = 0u, k, stale_before;
+    uint16_t term_before = 0u, t;
+    crash_obs_t o;
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+
+    printf("TC-034  stale delayed election traffic during retry [Lot 2D, Lot 2B]\n");
+    bus_init();
+    leader_idx = collision_prologue("Lot 2D", &shared_deadline, &crash_ms, &term_before);
+    if (leader_idx < 0) { return; }
+    obs_init(&o, leader_idx);
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        if (a < 0) { a = i; } else { b = i; }
+    }
+
+    /* Step until both survivors are candidates in the same term t. Their
+     * VOTE_REQs are now queued for delivery in the next step. */
+    for (k = 0; k < 1000u && !o.split_vote_seen; k++) { bus_step(); obs_step(&o); }
+    check(o.split_vote_seen, "Lot 2D", "initial split vote occurred naturally");
+    if (!o.split_vote_seen) { return; }
+    t = o.split_vote_term;
+    stale_before = g_bus.node[b].stale_term_rejections;
+
+    /* Delay a's real term-t VOTE_REQ towards b by 320 ms, one step only. */
+    bus_set_net_action((uint8_t)a, (uint8_t)b, NET_DELAY, 320u);
+    bus_step(); obs_step(&o);
+    bus_set_net_action((uint8_t)a, (uint8_t)b, NET_DELIVER, 0u);
+
+    /* Replay: a term-t VOTE_GRANT a -> b that arrives with the same delay. */
+    msg.type = MOSAIK_MSG_VOTE_GRANT;
+    msg.src = (uint8_t)(a + 1);
+    msg.version = MOSAIK_PROTO_VERSION;
+    msg.role = MOSAIK_ROLE_FOLLOWER;
+    msg.state = MOSAIK_STATE_NOMINAL;
+    msg.term = t;
+    msg.arg = (uint8_t)(b + 1);
+    mosaik_encode(&frame, &msg);
+    (void)bus_schedule_delayed(&frame, (uint8_t)(a + 1), 320u);
+
+    for (k = 0; k < 3000u; k++) { bus_step(); obs_step(&o); }
+
+    check(g_bus.node[b].term > t, "Lot 2D", "receiver advanced beyond the collision term");
+    check(g_bus.node[b].stale_term_rejections >= stale_before + 2u, "Lot 2B",
+          "delayed old-term VOTE_REQ and VOTE_GRANT both rejected as stale");
+    check(o.term_regressions == 0u, "Lot 2B", "stale traffic did not regress any term");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.valid_leader_term == 0u || o.valid_leader_term > t, "Lot 2B",
+          "no authority produced in the collision term by stale traffic");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == leader_idx) { continue; }
+        check((g_bus.node[i].state == MOSAIK_STATE_SAFE) ==
+              (o.max_failed[i] >= g_bus.node[i].cfg.max_failed_elections), "Lot 2D",
+              "SAFE if and only if max_failed_elections genuine failures (retry rules intact)");
+    }
+    printf("        collision term %u, stale rejections on node %d: %u -> %u, valid leader term %u\n",
+           t, b + 1, stale_before, g_bus.node[b].stale_term_rejections, o.valid_leader_term);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -2219,6 +2583,12 @@ int main(void)
     tc_028_crash_during_lease_expiry();
     tc_029_crash_during_election();
     tc_030_recovery_asymmetric_network();
+
+    /* LOT 2D: candidate retry backoff (C2-a) evidence */
+    tc_031_natural_collision_recovery();
+    tc_032_permanent_contention_safe_contract();
+    tc_033_asymmetric_partition_during_retry();
+    tc_034_stale_delayed_election_traffic();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
