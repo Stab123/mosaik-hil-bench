@@ -205,11 +205,13 @@ static bool bus_leader_has_inbound_quorum(int leader_idx)
     int inbound_count = 0;
     
     for (int k = 0; k < N_NODES; k++) {
-        if (k != leader_idx && g_bus.powered[k]) {
+        if (k != leader_idx) {
             /* Direct inbound message evidence only: */
             /* - Actually received by leader (recorded in inbound tracking) */
             /* - Current term */
             /* - Within lease freshness window */
+            /* The peer's powered/crashed state is deliberately NOT consulted:
+             * a real leader cannot know it; stale evidence simply ages out. */
             if (g_bus.leader_last_inbound_ms[leader_idx][k] > cutoff_ms &&
                 g_bus.leader_last_inbound_term[leader_idx][k] == current_term) {
                 inbound_count++;
@@ -355,7 +357,10 @@ static void bus_step(void)
     mosaik_frame_t pending[QUEUE_LEN];
     uint8_t pending_src[QUEUE_LEN];
     int n, i, j;
-    bool leader_hb_delivered[N_NODES] = {false};
+    /* Lot 2C integrity: set only when an admissible current-term ACK from a
+     * peer was ACTUALLY delivered to, and accepted by, a node holding the
+     * leader role during this step. */
+    bool leader_ack_received[N_NODES] = {false};
 
     /* Lot 2B: Process any delayed messages that are now due. */
     bus_process_delayed();
@@ -369,12 +374,7 @@ for (j = 0; j < n; j++) {
         uint8_t src_idx = pending_src[j] - 1; /* 0-indexed */
 
         mosaik_msg_t msg;
-        bool is_leader_heartbeat = false;
-
-        if (mosaik_decode(&pending[j], &msg)) {
-            is_leader_heartbeat = (msg.type == MOSAIK_MSG_HEARTBEAT &&
-                                   msg.role == MOSAIK_ROLE_LEADER);
-        }
+        bool decoded = mosaik_decode(&pending[j], &msg);
 
         for (i = 0; i < N_NODES; i++) {
             if (!g_bus.powered[i]) { continue; }
@@ -409,34 +409,39 @@ for (j = 0; j < n; j++) {
             /* NET_DELIVER */
             g_bus.messages_delivered++;
             mosaik_on_rx(&g_bus.node[i], g_bus.now_ms, &pending[j]);
-            /* Track inbound message for lease renewal quorum evidence. */
-            bus_update_leader_inbound(i, src_idx, msg.term);
 
-            /* If a leader's heartbeat was delivered to a follower, note it for lease renewal. */
-            if (is_leader_heartbeat && src_idx < N_NODES) {
-                leader_hb_delivered[src_idx] = true;
-                if (g_bus.node[i].state != MOSAIK_STATE_SAFE &&
-                    msg.term >= g_bus.node[i].term &&
-                    bus_get_net_action(i, src_idx) == NET_DELIVER) {
-                    bus_update_leader_inbound(src_idx, i, msg.term);
-                }
+            /* Lot 2C quorum-contact evidence integrity.
+             * Peer contact is credited ONLY for an ACK frame that was
+             * actually delivered to a node holding the leader role and that
+             * the protocol accepted: the node's own ACK handler recorded this
+             * ACK (seq, term) for its CURRENT term. Nothing is inferred from
+             * outbound heartbeat delivery, reverse-path connectivity,
+             * topology, powered/crashed state, or any other frame type.
+             * Old-term frames are never accepted by the node and therefore
+             * never credited; a delayed current-term ACK counts at the time
+             * it is actually received, subject to the freshness window. */
+            if (decoded && msg.type == MOSAIK_MSG_ACK && src_idx < N_NODES &&
+                g_bus.node[i].role == MOSAIK_ROLE_LEADER &&
+                msg.term == g_bus.node[i].term &&
+                g_bus.node[i].last_ack_term[src_idx] == g_bus.node[i].term &&
+                g_bus.node[i].last_ack_seq[src_idx] == msg.arg) {
+                bus_update_leader_inbound(i, src_idx, msg.term);
+                leader_ack_received[i] = true;
             }
         }
     }
-    /* Leadership lease renewal: BOTH outbound delivery to quorum AND inbound current-term quorum contact. */
+    /* Leadership lease renewal: only upon ACTUAL receipt of admissible peer
+     * contact in this step, and only while fresh current-term evidence from
+     * a quorum of peers exists (the leader itself is the implicit member).
+     * Outbound heartbeat transmission or delivery alone never renews. */
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && !g_bus.crashed[i] && g_bus.node[i].role == MOSAIK_ROLE_LEADER) {
-            bool has_outbound_delivery = leader_hb_delivered[i];
-            bool has_inbound_quorum = bus_leader_has_inbound_quorum(i);
-            
-            if (has_outbound_delivery && has_inbound_quorum) {
-                g_bus.node[i].last_quorum_contact_ms = g_bus.now_ms;
-                g_bus.node[i].lease_expiry_ms = g_bus.now_ms + MOSAIK_LEADERSHIP_LEASE_MS;
-                g_bus.lease_renewals++;
-                g_bus.quorum_contact_events++;
-            } else if (!has_inbound_quorum) {
-                /* Leader cannot receive current-term quorum - lease should not renew */
-            }
+        if (g_bus.powered[i] && !g_bus.crashed[i] && leader_ack_received[i] &&
+            g_bus.node[i].role == MOSAIK_ROLE_LEADER &&
+            bus_leader_has_inbound_quorum(i)) {
+            g_bus.node[i].last_quorum_contact_ms = g_bus.now_ms;
+            g_bus.node[i].lease_expiry_ms = g_bus.now_ms + MOSAIK_LEADERSHIP_LEASE_MS;
+            g_bus.lease_renewals++;
+            g_bus.quorum_contact_events++;
         }
     }
   
