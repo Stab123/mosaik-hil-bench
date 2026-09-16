@@ -35,6 +35,7 @@ static uint32_t base_for_type(mosaik_msg_type_t type)
     case MOSAIK_MSG_VOTE_REQ:   return MOSAIK_ID_VOTE_REQ_BASE;
     case MOSAIK_MSG_VOTE_GRANT: return MOSAIK_ID_VOTE_GRANT_BASE;
     case MOSAIK_MSG_HEARTBEAT:  return MOSAIK_ID_HEARTBEAT_BASE;
+    case MOSAIK_MSG_ACK:        return MOSAIK_ID_ACK_BASE;
     default:                    return 0u;
     }
 }
@@ -62,6 +63,11 @@ bool mosaik_decode(const mosaik_frame_t *frame, mosaik_msg_t *msg)
         return false;
     }
 
+    if (frame->id > MOSAIK_ID_ACK_BASE &&
+        frame->id <= MOSAIK_ID_ACK_BASE + MOSAIK_MAX_NODES) {
+        type = MOSAIK_MSG_ACK;
+        offset = MOSAIK_ID_ACK_BASE;
+    } else 
     if (frame->id > MOSAIK_ID_HEARTBEAT_BASE &&
         frame->id <= MOSAIK_ID_HEARTBEAT_BASE + MOSAIK_MAX_NODES) {
         type = MOSAIK_MSG_HEARTBEAT;

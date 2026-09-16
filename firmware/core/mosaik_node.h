@@ -88,6 +88,8 @@ typedef struct {
     /* Stale/replay detection (Lot 2B). */
     uint8_t          last_hb_seq[4];         /* last seen HB seq per src (1..3) */
     uint16_t         last_hb_term[4];        /* last seen HB term per src */
+    uint8_t          last_ack_seq[4];        /* last seen ACK seq per src (1..3) */
+    uint16_t         last_ack_term[4];       /* last seen ACK term per src */
 
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;

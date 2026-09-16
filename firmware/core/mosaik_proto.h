@@ -18,13 +18,15 @@
 #define MOSAIK_ID_VOTE_REQ_BASE   0x100u  /* 0x101..0x103 */
 #define MOSAIK_ID_VOTE_GRANT_BASE 0x180u  /* 0x181..0x183 */
 #define MOSAIK_ID_HEARTBEAT_BASE  0x200u  /* 0x201..0x203 */
+#define MOSAIK_ID_ACK_BASE        0x300u  /* 0x301..0x303 */
 
 typedef enum {
     MOSAIK_MSG_UNKNOWN = 0,
     MOSAIK_MSG_SAFE,
     MOSAIK_MSG_VOTE_REQ,
     MOSAIK_MSG_VOTE_GRANT,
-    MOSAIK_MSG_HEARTBEAT
+    MOSAIK_MSG_HEARTBEAT,
+    MOSAIK_MSG_ACK
 } mosaik_msg_type_t;
 
 typedef enum {

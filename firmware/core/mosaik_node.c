@@ -102,15 +102,16 @@ static mosaik_reject_reason_t check_heartbeat_stale(const mosaik_node_t *n,
      * another heartbeat in same term is split-brain (handled elsewhere).
      * If we are follower, check if the sender's authority is stale. */
     if (msg->term == n->term) {
+        uint8_t src_idx = src - 1u;
         /* Duplicate sequence number from same source. */
-        if (msg->arg == n->last_hb_seq[src] && n->last_hb_seq[src] != 0u) {
+        if (msg->arg == n->last_hb_seq[src_idx] && n->last_hb_seq[src_idx] != 0u) {
             return MOSAIK_REJECT_DUPLICATE_SEQ;
         }
         /* Stale authority: if sender claims leader but our lease from them
          * would have expired (we track per-sender lease via term). */
         if (msg->role == MOSAIK_ROLE_LEADER) {
             /* If we have a newer term recorded for this source, it's stale. */
-            if (n->last_hb_term[src] > msg->term) {
+            if (n->last_hb_term[src_idx] > msg->term) {
                 return MOSAIK_REJECT_STALE_AUTHORITY;
             }
         }
@@ -188,6 +189,8 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
     for (int i = 0; i < 4; i++) {
         node->last_hb_seq[i] = 0u;
         node->last_hb_term[i] = 0u;
+        node->last_ack_seq[i] = 0u;
+        node->last_ack_term[i] = 0u;
     }
     node->tx = tx;
     node->user = user;
@@ -262,15 +265,21 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         node->failed_elections = 0u;
         node->last_hb_rx_ms    = now_ms;
         /* Track last seen heartbeat sequence and term per source for
-         * duplicate/replay detection (Lot 2B). */
-        node->last_hb_seq[msg.src] = msg.arg;
-        node->last_hb_term[msg.src] = msg.term;
+         * duplicate/replay detection (Lot 2B). 0-indexed peer. */
+        node->last_hb_seq[msg.src - 1u] = msg.arg;
+        node->last_hb_term[msg.src - 1u] = msg.term;
         /* Leadership lease: followers must not challenge the leader until the
          * lease expires (500 ms). This enforces INV-LEADER-UNIQUE during
          * network partitions. A small random jitter is added after the lease
          * to prevent synchronized elections if the partition heals. */
         node->deadline_ms      = now_ms + MOSAIK_LEADERSHIP_LEASE_MS +
                                  (rng_next(node) % 50u);
+        /* Lot 2C: Send ACK for valid heartbeat (follower -> leader).
+         * Echo the heartbeat's sequence number (msg.arg) so the leader can
+         * match the ACK to a specific heartbeat. */
+        if (node->role == MOSAIK_ROLE_FOLLOWER) {
+            emit(node, MOSAIK_MSG_ACK, msg.arg);
+        }
         break;
 
     case MOSAIK_MSG_VOTE_REQ:
@@ -308,6 +317,25 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         }
         break;
 
+    case MOSAIK_MSG_ACK:
+        /* Lot 2C: ACK message handling. */
+        if (msg.term < node->term) {
+            g_last_reject_reason = MOSAIK_REJECT_STALE_TERM;
+            node->stale_term_rejections++;
+            return;
+        }
+        g_last_reject_reason = MOSAIK_REJECT_NONE;
+        
+        if (msg.src >= 4u) return;  /* source validation */
+        
+        if (msg.term == node->term) {
+            /* Record inbound ACK as per-peer quorum evidence (0-indexed peer). */
+            node->last_ack_seq[msg.src - 1u] = msg.arg;
+            node->last_ack_term[msg.src - 1u] = msg.term;
+            /* Do NOT directly update last_quorum_contact_ms here. */
+            /* Per-peer evidence is recorded; quorum evaluation is separate. */
+        }
+        break;
     case MOSAIK_MSG_SAFE:
         /* A peer has latched SAFE. The cluster continues degraded. */
         if (node->state == MOSAIK_STATE_NOMINAL) {
