@@ -37,6 +37,14 @@ typedef struct {
     uint16_t vote_timeout_ms;
     uint8_t  cluster_size;
     uint8_t  max_failed_elections; /* before declaring SAFE / NO_QUORUM */
+    /* Candidate retry backoff span (Lot 2D, C2-a). When a candidate's vote
+     * timeout expires without quorum and SAFE is not reached, the node waits
+     * an additional (rng % span) milliseconds, drawn from its own per-node
+     * RNG, before starting the next election. A span of S gives exactly S
+     * possible deterministic waits, 0..S-1 ms. A span of 1 gives a wait of
+     * 0 ms on every node, i.e. no desynchronisation. 0 is treated as 1.
+     * The first election attempt is unaffected. */
+    uint16_t candidate_retry_backoff_span_ms;
 } mosaik_config_t;
 
 /* Architecture-level defaults from MOSAIK-ADD-0001. */

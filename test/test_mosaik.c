@@ -2374,14 +2374,11 @@ static void tc_031_natural_collision_recovery(void)
 
 /* TC-032: permanent retry contention keeps the SAFE contract.
  * The randomized retry must not weaken SAFE when contention truly persists.
- * On the baseline the candidate retry is a fixed vote_timeout_ms, so every
- * retry after a natural collision is synchronized by construction and this
- * test is GREEN on c6f600b.
- * PHASE 2 (after C2-a is implemented): enable the line marked below so the
- * candidate retry backoff span is 1 ms, i.e. zero effective desynchronization.
- * Without that line the scenario degenerates into TC-031 and the SAFE
- * assertions here turn RED, which is the intended signal to enable it. The
- * configuration is NOT faked here: the field does not exist yet. */
+ * With candidate_retry_backoff_span_ms = 1 the C2-a retry backoff has
+ * exactly one possible value (0 ms) on every node, so retries after a
+ * natural collision stay synchronized by configuration. This is the
+ * documented way to reproduce permanent contention without touching any
+ * protocol internal. */
 static void tc_032_permanent_contention_safe_contract(void)
 {
     mosaik_config_t cfg;
@@ -2393,7 +2390,7 @@ static void tc_032_permanent_contention_safe_contract(void)
 
     printf("TC-032  permanent retry contention keeps SAFE contract [Lot 2D]\n");
     mosaik_config_default(&cfg);
-    /* PHASE 2: cfg.candidate_retry_backoff_span_ms = 1u; */
+    cfg.candidate_retry_backoff_span_ms = 1u; /* zero effective desynchronization */
     bus_init_with_cfg(&cfg);
     leader_idx = collision_prologue("Lot 2D", &shared_deadline, &crash_ms, &term_before);
     if (leader_idx < 0) { return; }

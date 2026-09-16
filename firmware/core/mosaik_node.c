@@ -10,6 +10,7 @@ void mosaik_config_default(mosaik_config_t *cfg)
     cfg->vote_timeout_ms         = 150u;
     cfg->cluster_size            = 3u;
     cfg->max_failed_elections    = 3u;
+    cfg->candidate_retry_backoff_span_ms = 50u; /* Lot 2D, C2-a */
 }
 
 mosaik_reject_reason_t mosaik_get_last_reject_reason(const mosaik_node_t *node)
@@ -379,11 +380,29 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
     }
 
     if (node->role == MOSAIK_ROLE_CANDIDATE) {
+        uint32_t span;
         node->failed_elections++;
         if (node->failed_elections >= node->cfg.max_failed_elections) {
             enter_safe(node, MOSAIK_SAFE_NO_QUORUM, now_ms);
             return;
         }
+        /* Lot 2D, C2-a: candidate retry backoff. A failed candidate does
+         * not retry at the timeout instant; it waits a locally drawn random
+         * backoff first, so two candidates that collided do not collide
+         * again in lock-step. The wait is not another failed election.
+         * Only state that belonged to the failed attempt is cleared: the
+         * collected votes. Term, voted_for and voted_term are preserved, so
+         * the one-vote-per-term rule still holds during the wait. The next
+         * election advances the term through start_election() when the
+         * backoff deadline expires on the follower path below. */
+        span = node->cfg.candidate_retry_backoff_span_ms;
+        if (span == 0u) {
+            span = 1u;
+        }
+        node->role        = MOSAIK_ROLE_FOLLOWER;
+        node->vote_mask   = 0u;
+        node->deadline_ms = now_ms + (rng_next(node) % span);
+        return;
     }
     start_election(node);
 }
