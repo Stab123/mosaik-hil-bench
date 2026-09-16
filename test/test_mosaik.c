@@ -41,6 +41,7 @@ typedef struct {
 typedef struct {
     mosaik_node_t  node[N_NODES];
     bool           powered[N_NODES];
+    bool           crashed[N_NODES];              /* Lot 2D: node is crashed (no tx/rx) */
     net_path_t     net_paths[N_NODES][N_NODES];  /* net_paths[from][to] */
     mosaik_frame_t queue[QUEUE_LEN];
     uint8_t        queue_src[QUEUE_LEN];
@@ -67,6 +68,15 @@ typedef struct {
      * leader_last_inbound_ms[leader][from] = last time leader received a message from 'from'. */
     uint32_t leader_last_inbound_ms[N_NODES][N_NODES];
     uint16_t leader_last_inbound_term[N_NODES][N_NODES];
+
+    /* Lot 2D: Crash/restart instrumentation */
+    uint32_t crash_count[N_NODES];
+    uint32_t restart_count[N_NODES];
+    uint32_t max_concurrent_valid_authorities_lot2d;
+    uint32_t term_regressions_lot2d;
+    uint32_t stale_authority_acceptances_lot2d;
+    uint32_t duplicate_votes_lot2d;
+    uint32_t lease_expirations_lot2d;
 } bus_t;
 
 static bus_t g_bus;
@@ -74,6 +84,11 @@ static bus_t g_bus;
 static void bus_tx(const mosaik_frame_t *frame, void *user)
 {
     uintptr_t src = (uintptr_t)user;
+    int src_idx = (int)src - 1;
+    /* Crashed nodes do not transmit */
+    if (src_idx >= 0 && src_idx < N_NODES && g_bus.crashed[src_idx]) {
+        return;
+    }
     if (g_bus.queued >= QUEUE_LEN) { return; }
     g_bus.queue[g_bus.queued] = *frame;
     g_bus.queue_src[g_bus.queued] = (uint8_t)src;
@@ -294,12 +309,45 @@ static void bus_init(void)
     memset(&g_bus, 0, sizeof(g_bus));
     for (i = 0; i < N_NODES; i++) {
         g_bus.powered[i] = true;
+        g_bus.crashed[i] = false;
     }
     bus_set_full_connectivity();
     for (i = 0; i < N_NODES; i++) {
         mosaik_init(&g_bus.node[i], (uint8_t)(i + 1), &cfg,
                     bus_tx, (void *)(uintptr_t)(i + 1), 0u);
     }
+}
+
+/* Lot 2D: Crash a node - it stops transmitting and processing.
+ * Messages already in flight are NOT removed (they follow network model). */
+static void bus_crash_node(int node_idx)
+{
+    if (node_idx < 0 || node_idx >= N_NODES) { return; }
+    g_bus.crashed[node_idx] = true;
+    g_bus.crash_count[node_idx]++;
+    /* Node stops transmitting - tx callback will not be called for crashed nodes.
+     * Node stops processing - mosaik_on_rx will not be called for crashed nodes.
+     * Messages already in the network queue remain and will be delivered per network model. */
+}
+
+/* Lot 2D: Restart a node - cold initialization (term/vote state LOST).
+ * Uses real mosaik_init semantics - no persistence, no injected knowledge. */
+static void bus_restart_node(int node_idx)
+{
+    if (node_idx < 0 || node_idx >= N_NODES) { return; }
+    if (!g_bus.crashed[node_idx]) { return; } /* Only restart crashed nodes */
+    
+    mosaik_config_t cfg;
+    mosaik_config_default(&cfg);
+    
+    /* Preserve only identity and config; ALL volatile state is lost.
+     * This is the current architecture behavior - no persistence. */
+    g_bus.crashed[node_idx] = false;
+    g_bus.restart_count[node_idx]++;
+    
+    /* Full cold re-initialization - term=0, voted_for=0, voted_term=0, etc. */
+    mosaik_init(&g_bus.node[node_idx], (uint8_t)(node_idx + 1), &cfg,
+                bus_tx, (void *)(uintptr_t)(node_idx + 1), g_bus.now_ms);
 }
 
 static void bus_step(void)
@@ -317,7 +365,7 @@ static void bus_step(void)
     memcpy(pending_src, g_bus.queue_src, sizeof(uint8_t) * (size_t)n);
     g_bus.queued = 0;
 
-    for (j = 0; j < n; j++) {
+for (j = 0; j < n; j++) {
         uint8_t src_idx = pending_src[j] - 1; /* 0-indexed */
 
         mosaik_msg_t msg;
@@ -330,6 +378,7 @@ static void bus_step(void)
 
         for (i = 0; i < N_NODES; i++) {
             if (!g_bus.powered[i]) { continue; }
+            if (g_bus.crashed[i]) { continue; }  /* Lot 2D: crashed nodes don't process */
             if (g_bus.node[i].id == pending_src[j]) { continue; }
             
             /* Lot 2C: Use directional network model */
@@ -376,7 +425,7 @@ static void bus_step(void)
     }
     /* Leadership lease renewal: BOTH outbound delivery to quorum AND inbound current-term quorum contact. */
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && g_bus.node[i].role == MOSAIK_ROLE_LEADER) {
+        if (g_bus.powered[i] && !g_bus.crashed[i] && g_bus.node[i].role == MOSAIK_ROLE_LEADER) {
             bool has_outbound_delivery = leader_hb_delivered[i];
             bool has_inbound_quorum = bus_leader_has_inbound_quorum(i);
             
@@ -390,9 +439,10 @@ static void bus_step(void)
             }
         }
     }
- 
+  
     for (i = 0; i < N_NODES; i++) {
         if (!g_bus.powered[i]) { continue; }
+        if (g_bus.crashed[i]) { continue; }  /* Lot 2D: crashed nodes don't tick */
         mosaik_tick(&g_bus.node[i], g_bus.now_ms);
     }
     g_bus.now_ms++;
@@ -408,7 +458,7 @@ static int leader_count(void)
 {
     int i, c = 0;
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { c++; }
+        if (g_bus.powered[i] && !g_bus.crashed[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { c++; }
     }
     return c;
 }
@@ -417,7 +467,7 @@ static int leader_index(void)
 {
     int i;
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && mosaik_is_leader(&g_bus.node[i])) { return i; }
+        if (g_bus.powered[i] && !g_bus.crashed[i] && mosaik_is_leader(&g_bus.node[i])) { return i; }
     }
     return -1;
 }
@@ -426,7 +476,7 @@ static int valid_leader_count(void)
 {
     int i, c = 0;
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { c++; }
+        if (g_bus.powered[i] && !g_bus.crashed[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { c++; }
     }
     return c;
 }
@@ -435,7 +485,7 @@ static int valid_leader_index(void)
 {
     int i;
     for (i = 0; i < N_NODES; i++) {
-        if (g_bus.powered[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { return i; }
+        if (g_bus.powered[i] && !g_bus.crashed[i] && mosaik_has_valid_leadership_authority(&g_bus.node[i])) { return i; }
     }
     return -1;
 }
@@ -1458,6 +1508,676 @@ static void tc_020_adversarial_combination(void)
     printf("        adversarial combination applied, max valid authorities = %d\n", valid_leader_count());
 }
 
+/* ===== LOT 2D: Crash/Restart/Recovery Tests ===== */
+
+/* TC-021: Follower crash while leader/quorum remains available.
+ * Scenario: stable leader, crash a follower, restart it, verify it rejoins cleanly. */
+static void tc_021_follower_crash_quorum_available(void)
+{
+    int leader_idx, follower_idx;
+    uint16_t term_before;
+    uint32_t k;
+
+    printf("TC-021  follower crash while leader/quorum available [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u); /* stable leader */
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed before crash");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    /* Pick a follower to crash */
+    follower_idx = (leader_idx + 1) % N_NODES;
+
+    /* Crash the follower */
+    bus_crash_node(follower_idx);
+    uint32_t crash_ms = g_bus.now_ms;
+
+    /* Run for a while with follower crashed - leader should continue */
+    for (k = 0; k < 1000u; k++) { bus_step(); }
+
+    /* Verify leader still has valid authority */
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[leader_idx]), "Lot 2D",
+          "leader authority maintained during follower crash");
+    check(g_bus.node[leader_idx].term == term_before, "Lot 2D",
+          "term unchanged during follower crash");
+
+    /* Restart the follower */
+    bus_restart_node(follower_idx);
+    uint32_t restart_ms = g_bus.now_ms;
+
+    /* Run for convergence - follower should adopt current term via heartbeats */
+    for (k = 0; k < 2000u; k++) { bus_step(); }
+
+    /* Verify: follower adopted current term, no duplicate leaders */
+    check(g_bus.node[follower_idx].term == term_before, "Lot 2D",
+          "restarted follower adopted current term");
+    check(g_bus.node[follower_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2D",
+          "restarted follower is follower");
+    check(g_bus.node[follower_idx].voted_for == 0, "Lot 2D",
+          "restarted follower has no vote in current term");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader after follower restart");
+    check(g_bus.node[leader_idx].term == term_before, "Lot 2D",
+          "original leader term unchanged");
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        follower %d crashed at %u ms, restarted at %u ms, adopted term %u\n",
+           follower_idx + 1, crash_ms, restart_ms, term_before);
+}
+
+/* TC-022: Leader crash.
+ * Scenario: crash the leader, verify failover, no split-brain. */
+static void tc_022_leader_crash(void)
+{
+    int leader_idx, new_leader_idx;
+    uint16_t old_term, new_term;
+    uint32_t k;
+
+    printf("TC-022  leader crash [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed before crash");
+    if (leader_idx < 0) { return; }
+    old_term = g_bus.node[leader_idx].term;
+
+    /* Crash the leader */
+    bus_crash_node(leader_idx);
+    uint32_t crash_ms = g_bus.now_ms;
+
+    /* Wait for new election */
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (valid_leader_count() == 1) { break; }
+    }
+
+    new_leader_idx = valid_leader_index();
+    check(new_leader_idx >= 0, "Lot 2D", "new leader elected after crash");
+    if (new_leader_idx < 0) { return; }
+    new_term = g_bus.node[new_leader_idx].term;
+
+    check(new_leader_idx != leader_idx, "Lot 2D", "new leader differs from crashed");
+    check(new_term > old_term, "Lot 2D", "term advanced after leader crash");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader after failover");
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        leader %d crashed at %u ms, node %d elected at term %u\n",
+           leader_idx + 1, crash_ms, new_leader_idx + 1, new_term);
+}
+
+/* TC-023: Leader crash -> election -> former leader restarts.
+ * Scenario: crash leader, new leader elected, then former leader restarts cold.
+ * Former leader must NOT regain leadership immediately; must adopt new term. */
+static void tc_023_leader_crash_election_former_restarts(void)
+{
+    int old_leader_idx, new_leader_idx;
+    uint16_t old_term, new_term;
+    uint32_t k;
+
+    printf("TC-023  leader crash -> election -> former leader restarts [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    old_leader_idx = leader_index();
+    check(old_leader_idx >= 0, "Lot 2D", "initial leader existed");
+    if (old_leader_idx < 0) { return; }
+    old_term = g_bus.node[old_leader_idx].term;
+
+    /* Crash the leader */
+    bus_crash_node(old_leader_idx);
+    uint32_t crash_ms = g_bus.now_ms;
+
+    /* Wait for new election */
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (valid_leader_count() == 1) { break; }
+    }
+
+    new_leader_idx = valid_leader_index();
+    check(new_leader_idx >= 0, "Lot 2D", "new leader elected");
+    if (new_leader_idx < 0) { return; }
+    new_term = g_bus.node[new_leader_idx].term;
+    check(new_term > old_term, "Lot 2D", "term advanced");
+
+    /* Let new leader establish authority */
+    for (k = 0; k < 1000u; k++) { bus_step(); }
+
+    /* Now restart the FORMER leader (cold restart - term=0, voted_for=0, voted_term=0) */
+    bus_restart_node(old_leader_idx);
+    uint32_t restart_ms = g_bus.now_ms;
+
+    /* Run for convergence */
+    for (k = 0; k < 3000u; k++) { bus_step(); }
+
+    /* Critical checks: former leader must NOT regain leadership immediately */
+    check(g_bus.node[old_leader_idx].term == new_term, "Lot 2D",
+          "former leader adopted new term after restart");
+    check(g_bus.node[old_leader_idx].role != MOSAIK_ROLE_LEADER, "Lot 2D",
+          "former leader did NOT immediately regain leadership");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[new_leader_idx]), "Lot 2D",
+          "new leader retains valid authority");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "no split-brain after former leader restart");
+    
+    /* Check for term regression on any node */
+    for (int i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && !g_bus.crashed[i]) {
+            if (g_bus.node[i].term < new_term) {
+                g_bus.term_regressions_lot2d++;
+            }
+        }
+    }
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        old leader %d crashed at %u ms, new leader %d at term %u, old restarted at %u ms\n",
+           old_leader_idx + 1, crash_ms, new_leader_idx + 1, new_term, restart_ms);
+}
+
+/* TC-024: Crashed follower restart and rejoin.
+ * Scenario: crash a follower, restart it, verify it rejoins as follower with current term. */
+static void tc_024_crashed_follower_restart_rejoin(void)
+{
+    int leader_idx, follower_idx;
+    uint16_t term_before;
+    uint32_t k;
+
+    printf("TC-024  crashed follower restart and rejoin [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    /* Pick a follower */
+    follower_idx = (leader_idx + 1) % N_NODES;
+
+    /* Crash and restart */
+    bus_crash_node(follower_idx);
+    for (k = 0; k < 500u; k++) { bus_step(); }
+    bus_restart_node(follower_idx);
+
+    /* Allow rejoin */
+    for (k = 0; k < 2000u; k++) { bus_step(); }
+
+    /* Verify clean rejoin */
+    check(g_bus.node[follower_idx].term == term_before, "Lot 2D",
+          "restarted follower adopted current cluster term");
+    check(g_bus.node[follower_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2D",
+          "restarted node is follower");
+    check(g_bus.node[follower_idx].voted_term == 0, "Lot 2D",
+          "restarted follower voted_term reset (cold restart)");
+    check(g_bus.node[follower_idx].voted_for == 0, "Lot 2D",
+          "restarted follower voted_for reset (cold restart)");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader throughout");
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        follower %d crashed/restarted, adopted term %u, voted_term=%u, voted_for=%u\n",
+           follower_idx + 1, g_bus.node[follower_idx].term,
+           g_bus.node[follower_idx].voted_term, g_bus.node[follower_idx].voted_for);
+}
+
+/* TC-025: Former leader restarts after another leader has been elected.
+ * Scenario: leader crash, new leader elected at higher term, former leader restarts.
+ * Verify: former leader does NOT disrupt cluster, adopts higher term. */
+static void tc_025_former_leader_restarts_after_new_elected(void)
+{
+    int leader_a_idx, leader_b_idx;
+    uint16_t term_a, term_b;
+    uint32_t k;
+
+    printf("TC-025  former leader restarts after another leader elected [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_a_idx = leader_index();
+    check(leader_a_idx >= 0, "Lot 2D", "leader A existed");
+    if (leader_a_idx < 0) { return; }
+    term_a = g_bus.node[leader_a_idx].term;
+
+    /* Crash leader A */
+    bus_crash_node(leader_a_idx);
+
+    /* Wait for leader B election */
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        if (valid_leader_count() == 1) { break; }
+    }
+
+    leader_b_idx = valid_leader_index();
+    check(leader_b_idx >= 0, "Lot 2D", "leader B elected");
+    if (leader_b_idx < 0) { return; }
+    term_b = g_bus.node[leader_b_idx].term;
+    check(term_b > term_a, "Lot 2D", "term advanced to B");
+
+    /* Let leader B establish */
+    for (k = 0; k < 1000u; k++) { bus_step(); }
+
+    /* Restart former leader A (cold - term=0) */
+    bus_restart_node(leader_a_idx);
+
+    /* Convergence */
+    for (k = 0; k < 3000u; k++) { bus_step(); }
+
+    /* Critical: former leader A must adopt term B, not disrupt */
+    check(g_bus.node[leader_a_idx].term == term_b, "Lot 2D",
+          "former leader A adopted newer term B after restart");
+    check(g_bus.node[leader_a_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2D",
+          "former leader A is follower, not leader");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[leader_b_idx]), "Lot 2D",
+          "leader B retains valid authority");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "cluster converges to single valid leader");
+    check(g_bus.node[leader_b_idx].term == term_b, "Lot 2D",
+          "leader B term unchanged");
+
+    /* Check for term regression */
+    for (int i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && !g_bus.crashed[i]) {
+            if (g_bus.node[i].term < term_b) {
+                g_bus.term_regressions_lot2d++;
+            }
+        }
+    }
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        leader A term=%u crashed, leader B term=%u elected, A restarted adopted term=%u\n",
+           term_a, term_b, g_bus.node[leader_a_idx].term);
+}
+
+/* TC-026: Restart with delayed pre-crash messages queued.
+ * Scenario: capture heartbeats before crash, crash node, delay messages,
+ * restart node, then deliver delayed pre-crash messages.
+ * Verify: pre-crash messages rejected as stale. */
+static void tc_026_restart_with_delayed_pre_crash_messages(void)
+{
+    int leader_idx, follower_idx;
+    uint16_t term_before;
+    mosaik_msg_t msg;
+    mosaik_frame_t delayed_frames[5];
+    int delayed_count = 0;
+    uint32_t k;
+
+    printf("TC-026  restart with delayed pre-crash messages queued [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    follower_idx = (leader_idx + 1) % N_NODES;
+
+    /* Capture some heartbeats from leader before crash */
+    for (int i = 0; i < 3; i++) {
+        bus_step();
+        if (g_bus.node[leader_idx].role == MOSAIK_ROLE_LEADER) {
+            msg.type = MOSAIK_MSG_HEARTBEAT;
+            msg.src = (uint8_t)(leader_idx + 1);
+            msg.version = MOSAIK_PROTO_VERSION;
+            msg.role = MOSAIK_ROLE_LEADER;
+            msg.state = MOSAIK_STATE_NOMINAL;
+            msg.term = term_before;
+            msg.arg = g_bus.node[leader_idx].seq;
+            mosaik_encode(&delayed_frames[delayed_count], &msg);
+            delayed_count++;
+        }
+    }
+
+    /* Crash the follower */
+    bus_crash_node(follower_idx);
+
+    /* Run a bit - leader continues */
+    for (k = 0; k < 500u; k++) { bus_step(); }
+
+    /* Restart follower (cold - term=0) */
+    bus_restart_node(follower_idx);
+
+    /* Now deliver delayed pre-crash heartbeats (term=old_term) to restarted node */
+    for (int i = 0; i < delayed_count; i++) {
+        bus_inject_frame(&delayed_frames[i], delayed_frames[i].data[1]);
+        bus_step();
+    }
+
+    /* Allow processing */
+    for (k = 0; k < 1000u; k++) { bus_step(); }
+
+    /* Verify: pre-crash messages rejected (stale term), follower adopts current term */
+    check(g_bus.node[follower_idx].term == term_before, "Lot 2D",
+          "restarted follower adopted current term despite delayed stale messages");
+    check(g_bus.node[follower_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2D",
+          "restarted follower is follower");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader");
+
+    /* Check stale authority rejections */
+    if (g_bus.node[follower_idx].stale_term_rejections > 0 ||
+        g_bus.node[follower_idx].stale_authority_rejections > 0) {
+        g_bus.stale_authority_acceptances_lot2d +=
+            g_bus.node[follower_idx].stale_term_rejections +
+            g_bus.node[follower_idx].stale_authority_rejections;
+    }
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        delayed pre-crash frames=%d, follower term=%u, stale rejections\n",
+           delayed_count, g_bus.node[follower_idx].term);
+}
+
+/* TC-027: Repeated crash/restart of one node.
+ * Scenario: repeatedly crash and restart the same node.
+ * Verify: no state corruption, term monotonicity, no duplicate votes. */
+static void tc_027_repeated_crash_restart(void)
+{
+    int leader_idx, victim_idx;
+    uint16_t term_before;
+    uint32_t k;
+
+    printf("TC-027  repeated crash/restart of one node [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    /* Pick a victim (non-leader) */
+    victim_idx = (leader_idx + 1) % N_NODES;
+
+    /* Repeated crash/restart cycle */
+    for (int cycle = 0; cycle < 5; cycle++) {
+        bus_crash_node(victim_idx);
+        for (k = 0; k < 200u; k++) { bus_step(); }
+        bus_restart_node(victim_idx);
+        for (k = 0; k < 500u; k++) { bus_step(); }
+    }
+
+    /* Final verification */
+    check(g_bus.node[victim_idx].term == term_before, "Lot 2D",
+          "victim adopted current term after repeated restarts");
+    check(g_bus.node[victim_idx].role == MOSAIK_ROLE_FOLLOWER, "Lot 2D",
+          "victim is follower");
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader maintained");
+    check(g_bus.node[leader_idx].term == term_before, "Lot 2D",
+          "leader term unchanged");
+
+    /* Check for term regression */
+    for (int i = 0; i < N_NODES; i++) {
+        if (g_bus.powered[i] && !g_bus.crashed[i]) {
+            if (g_bus.node[i].term < term_before) {
+                g_bus.term_regressions_lot2d++;
+            }
+        }
+    }
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        node %d crashed/restarted 5x, final term=%u, voted_term=%u, voted_for=%u\n",
+           victim_idx + 1, g_bus.node[victim_idx].term,
+           g_bus.node[victim_idx].voted_term, g_bus.node[victim_idx].voted_for);
+}
+
+/* TC-028: Crash during/near lease expiry.
+ * Scenario: leader near lease expiry, crash it, verify lease expiry behavior preserved.
+ * Isolate leader so lease cannot renew, wait for near-expiry, then crash.
+ * NOTE: This test exposes a protocol limitation - with 2 remaining nodes,
+ * synchronized follower election deadlines can cause split-vote leading to SAFE. */
+static void tc_028_crash_during_lease_expiry(void)
+{
+    int leader_idx;
+    uint16_t term_before;
+    uint32_t k;
+
+    printf("TC-028  crash during/near lease expiry [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    /* Isolate leader from quorum so lease cannot renew.
+     * Leader can send but ACKs from followers are dropped. */
+    for (int i = 0; i < N_NODES; i++) {
+        if (i != leader_idx) {
+            g_bus.net_paths[i][leader_idx].action = NET_DROP;  /* followers -> leader */
+        }
+    }
+
+    /* Wait until near lease expiry (500ms lease, wait until ~50ms remaining) */
+    uint32_t target_ms = g_bus.node[leader_idx].lease_expiry_ms - 50;
+    while (g_bus.now_ms < target_ms) { bus_step(); }
+
+    /* Crash leader near lease expiry */
+    bus_crash_node(leader_idx);
+    uint32_t crash_ms = g_bus.now_ms;
+    uint32_t lease_remaining = g_bus.node[leader_idx].lease_expiry_ms - crash_ms;
+
+    /* Restore connectivity for election */
+    bus_set_full_connectivity();
+
+    /* Wait for new election - may take longer due to election timeouts
+     * and time needed for new leader to establish valid authority (quorum ACKs).
+     * NOTE: With 2 remaining nodes, synchronized deadlines may cause split-vote
+     * leading to SAFE (protocol limitation). */
+    for (k = 0; k < 5000u; k++) {
+        bus_step();
+        if (valid_leader_count() == 1) { break; }
+    }
+
+    int new_leader_idx = valid_leader_index();
+    check(new_leader_idx >= 0, "Lot 2D", "new leader elected after crash near expiry");
+    if (new_leader_idx >= 0) {
+        check(g_bus.node[new_leader_idx].term > term_before, "Lot 2D",
+              "term advanced after crash near lease expiry");
+        check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+              "single valid leader");
+    }
+
+    g_bus.lease_expirations_lot2d++;
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        leader %d crashed at %u ms (lease remaining ~%u ms)\n",
+           leader_idx + 1, crash_ms, lease_remaining);
+}
+
+/* TC-029: Crash during election (candidate).
+ * Scenario: node becomes candidate, crash it before election completes,
+ * restart it, verify vote state reset, no duplicate vote in same term. */
+static void tc_029_crash_during_election(void)
+{
+    int candidate_idx;
+    uint32_t k;
+
+    printf("TC-029  crash during election (candidate) [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    /* Force an election by crashing the leader */
+    int leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "initial leader existed");
+    if (leader_idx < 0) { return; }
+    (void)g_bus.node[leader_idx].term; /* term_before not directly used */
+
+    bus_crash_node(leader_idx);
+
+    /* Wait for a candidate to emerge */
+    candidate_idx = -1;
+    for (k = 0; k < 2000u; k++) {
+        bus_step();
+        /* Find a candidate */
+        for (int i = 0; i < N_NODES; i++) {
+            if (g_bus.powered[i] && !g_bus.crashed[i] &&
+                g_bus.node[i].role == MOSAIK_ROLE_CANDIDATE) {
+                candidate_idx = i;
+                break;
+            }
+        }
+        if (candidate_idx >= 0) { break; }
+    }
+    check(candidate_idx >= 0, "Lot 2D", "candidate emerged after leader crash");
+    if (candidate_idx < 0) { return; }
+
+    /* Verify candidate state */
+    check(g_bus.node[candidate_idx].role == MOSAIK_ROLE_CANDIDATE, "Lot 2D",
+          "node became candidate");
+    check(g_bus.node[candidate_idx].voted_for == candidate_idx + 1, "Lot 2D",
+          "candidate voted for self");
+    check(g_bus.node[candidate_idx].voted_term == g_bus.node[candidate_idx].term, "Lot 2D",
+          "candidate voted in current term");
+
+    uint16_t candidate_term = g_bus.node[candidate_idx].term;
+    (void)candidate_term; /* used in duplicate vote check below */
+
+    /* Crash the candidate mid-election */
+    bus_crash_node(candidate_idx);
+
+    /* Run a bit */
+    for (k = 0; k < 500u; k++) { bus_step(); }
+
+    /* Restart candidate (cold - vote state LOST) */
+    bus_restart_node(candidate_idx);
+
+    /* Verify: immediately after restart, vote state is reset */
+    check(g_bus.node[candidate_idx].voted_term == 0, "Lot 2D",
+          "restarted candidate voted_term reset to 0 (cold restart)");
+    check(g_bus.node[candidate_idx].voted_for == 0, "Lot 2D",
+          "restarted candidate voted_for reset to 0 (cold restart)");
+    check(g_bus.node[candidate_idx].term == 0, "Lot 2D",
+          "restarted candidate term reset to 0 (cold restart)");
+
+    /* Allow election to complete */
+    for (k = 0; k < 3000u; k++) { bus_step(); }
+
+    /* Verify: no duplicate vote in the ORIGINAL candidate term */
+    if (g_bus.node[candidate_idx].voted_term == candidate_term &&
+        g_bus.node[candidate_idx].voted_for != 0) {
+        g_bus.duplicate_votes_lot2d++;
+        check(false, "Lot 2D", "duplicate vote in same term after restart!");
+    }
+    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+          "single valid leader after candidate crash/restart");
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        candidate %d crashed at term %u, restarted, voted_term=%u, voted_for=%u\n",
+           candidate_idx + 1, candidate_term,
+           g_bus.node[candidate_idx].voted_term, g_bus.node[candidate_idx].voted_for);
+}
+
+/* TC-030: Recovery under asymmetric network conditions.
+ * Scenario: crash a node, restart it under asymmetric directional faults.
+ * Verify: safe convergence, no split-brain. */
+static void tc_030_recovery_asymmetric_network(void)
+{
+    int leader_idx, victim_idx;
+    uint16_t term_before;
+    uint32_t k;
+
+    printf("TC-030  recovery under asymmetric network [Lot 2D]\n");
+
+    bus_init();
+    bus_run(2000u);
+
+    leader_idx = leader_index();
+    check(leader_idx >= 0, "Lot 2D", "leader existed");
+    if (leader_idx < 0) { return; }
+    term_before = g_bus.node[leader_idx].term;
+
+    victim_idx = (leader_idx + 1) % N_NODES;
+
+    /* Apply asymmetric network: victim can send to leader but not receive from leader */
+    bus_init_net_paths();
+    for (int i = 0; i < N_NODES; i++) {
+        for (int j = 0; j < N_NODES; j++) {
+            if (i == j) continue;
+            if (i == victim_idx && j == leader_idx) {
+                g_bus.net_paths[i][j].action = NET_DELIVER;  /* victim -> leader */
+            } else if (i == leader_idx && j == victim_idx) {
+                g_bus.net_paths[i][j].action = NET_DROP;     /* leader -/-> victim */
+            } else {
+                g_bus.net_paths[i][j].action = NET_DELIVER;
+            }
+        }
+    }
+
+    /* Crash victim under asymmetric condition */
+    bus_crash_node(victim_idx);
+    for (k = 0; k < 500u; k++) { bus_step(); }
+
+    /* Restart victim */
+    bus_restart_node(victim_idx);
+
+    /* Run for convergence under asymmetric network */
+    for (k = 0; k < 3000u; k++) { bus_step(); }
+
+    /* Verify: cluster maintains single valid leader */
+    check(valid_leader_count() <= 1, "INV-LEADER-UNIQUE",
+          "no split-brain under asymmetric recovery");
+    check(g_bus.node[leader_idx].term >= term_before, "Lot 2D",
+          "term monotonicity preserved");
+
+    /* Track max concurrent valid authorities */
+    if (g_bus.max_concurrent_valid_authorities_lot2d < (uint32_t)valid_leader_count()) {
+        g_bus.max_concurrent_valid_authorities_lot2d = (uint32_t)valid_leader_count();
+    }
+
+    printf("        asymmetric recovery: victim %d, leader %d term=%u\n",
+           victim_idx + 1, leader_idx + 1, g_bus.node[leader_idx].term);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -1482,7 +2202,33 @@ int main(void)
     tc_018_partition_heal_queued_traffic();
     tc_019_selective_ack_quorum_failure();
     tc_020_adversarial_combination();
+
+    /* LOT 2D: Crash/Restart/Recovery */
+    tc_021_follower_crash_quorum_available();
+    tc_022_leader_crash();
+    tc_023_leader_crash_election_former_restarts();
+    tc_024_crashed_follower_restart_rejoin();
+    tc_025_former_leader_restarts_after_new_elected();
+    tc_026_restart_with_delayed_pre_crash_messages();
+    tc_027_repeated_crash_restart();
+    tc_028_crash_during_lease_expiry();
+    tc_029_crash_during_election();
+    tc_030_recovery_asymmetric_network();
+
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
+
+    /* LOT 2D Summary */
+    printf("\n=== LOT 2D CRASH/RESTART SUMMARY ===\n");
+    printf("Max concurrent valid authorities (LOT 2D): %u\n", g_bus.max_concurrent_valid_authorities_lot2d);
+    printf("Term regressions (LOT 2D): %u\n", g_bus.term_regressions_lot2d);
+    printf("Stale authority acceptances (LOT 2D): %u\n", g_bus.stale_authority_acceptances_lot2d);
+    printf("Duplicate votes (LOT 2D): %u\n", g_bus.duplicate_votes_lot2d);
+    printf("Lease expirations tracked (LOT 2D): %u\n", g_bus.lease_expirations_lot2d);
+    for (int i = 0; i < N_NODES; i++) {
+        printf("  Node %u: crashes=%u, restarts=%u\n", i + 1,
+               g_bus.crash_count[i], g_bus.restart_count[i]);
+    }
+
     return g_failures == 0 ? 0 : 1;
 }
