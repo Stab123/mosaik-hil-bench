@@ -77,6 +77,10 @@ typedef struct {
     uint32_t stale_authority_acceptances_lot2d;
     uint32_t duplicate_votes_lot2d;
     uint32_t lease_expirations_lot2d;
+
+    /* LOT 3 OBSERVATION: frames actually emitted per source node and message
+     * type, counted in bus_tx(). Read by tests only; never read by any node. */
+    uint32_t tx_count[N_NODES][6];
 } bus_t;
 
 static bus_t g_bus;
@@ -88,6 +92,13 @@ static void bus_tx(const mosaik_frame_t *frame, void *user)
     /* Crashed nodes do not transmit */
     if (src_idx >= 0 && src_idx < N_NODES && g_bus.crashed[src_idx]) {
         return;
+    }
+    /* LOT 3 OBSERVATION only: record what this node actually emitted. */
+    if (src_idx >= 0 && src_idx < N_NODES) {
+        mosaik_msg_t obs;
+        if (mosaik_decode(frame, &obs) && (int)obs.type >= 0 && (int)obs.type < 6) {
+            g_bus.tx_count[src_idx][(int)obs.type]++;
+        }
     }
     if (g_bus.queued >= QUEUE_LEN) { return; }
     g_bus.queue[g_bus.queued] = *frame;
@@ -2544,6 +2555,822 @@ static void tc_034_stale_delayed_election_traffic(void)
            t, b + 1, stale_before, g_bus.node[b].stale_term_rejections, o.valid_leader_term);
 }
 
+/* ---------------------------------------------------------------------
+ * LOT 3 - FDIR / SAFE evidence tests, TC-035..TC-050 (Phase 1, RED baseline).
+ *
+ * Rules honoured by these tests:
+ *  - no protocol internal (term, voted_for, voted_term, role, lease_expiry_ms,
+ *    deadline_ms, rng, ...) is ever written from the harness;
+ *  - faults are injected only through the existing mechanisms: directional
+ *    network actions, crash/cold restart, frame injection and delayed
+ *    delivery, and the TC-004 style targeted delivery of one adversarial
+ *    frame to one node;
+ *  - harness knowledge (topology, crashed[], other nodes' state, counters)
+ *    is used for assertions only and never reaches a node.
+ * ------------------------------------------------------------------- */
+
+/* Per-step read-only trajectory observation of every running node. */
+typedef struct {
+    uint32_t max_valid;                 /* INV-LEADER-UNIQUE evidence */
+    uint32_t first_valid_ms;            /* first step with exactly one valid authority, 0 if none */
+    int      first_valid_idx;
+    uint32_t term_regressions;
+    uint32_t safe_auth_violations;      /* state SAFE and valid authority */
+    uint32_t safe_role_violations;      /* state SAFE and role != FOLLOWER */
+    uint32_t safe_exits;                /* SAFE -> not SAFE without a cold restart */
+    uint32_t max_safe_nodes;            /* max simultaneous SAFE nodes */
+    bool     leader_degraded_valid_seen;/* a valid leader observed in DEGRADED */
+    uint32_t steps_nominal[N_NODES];
+    uint32_t steps_degraded[N_NODES];
+    uint32_t nom_to_deg[N_NODES];
+    uint32_t deg_to_nom[N_NODES];
+    uint32_t first_degraded_ms[N_NODES];        /* 0 = never */
+    uint32_t first_deg_run_len[N_NODES];        /* length of the first DEGRADED run */
+    bool     first_deg_run_open[N_NODES];
+    uint32_t nominal_after_first_deg[N_NODES];  /* NOMINAL steps after first DEGRADED entry */
+    uint8_t  max_failed[N_NODES];
+    mosaik_state_t last_state[N_NODES];
+    uint16_t last_term[N_NODES];
+    uint32_t last_restart[N_NODES];
+} traj_obs_t;
+
+static void traj_init(traj_obs_t *o)
+{
+    int i;
+    memset(o, 0, sizeof(*o));
+    o->first_valid_idx = -1;
+    for (i = 0; i < N_NODES; i++) {
+        o->last_state[i]   = g_bus.node[i].state;
+        o->last_term[i]    = g_bus.node[i].term;
+        o->last_restart[i] = g_bus.restart_count[i];
+    }
+}
+
+static void traj_step(traj_obs_t *o)
+{
+    int i;
+    uint32_t v = (uint32_t)valid_leader_count();
+    uint32_t safe_n = 0u;
+
+    if (v > o->max_valid) { o->max_valid = v; }
+    if (v == 1u && o->first_valid_ms == 0u) {
+        o->first_valid_ms  = g_bus.now_ms;
+        o->first_valid_idx = valid_leader_index();
+    }
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (g_bus.restart_count[i] != o->last_restart[i]) {
+            /* cold restart: a new volatile instance, no regression or exit counted */
+            o->last_restart[i] = g_bus.restart_count[i];
+            o->last_state[i]   = n->state;
+            o->last_term[i]    = n->term;
+        }
+        if (n->term < o->last_term[i]) { o->term_regressions++; }
+        o->last_term[i] = n->term;
+        if (n->failed_elections > o->max_failed[i]) { o->max_failed[i] = n->failed_elections; }
+
+        if (n->state == MOSAIK_STATE_SAFE) {
+            safe_n++;
+            if (mosaik_has_valid_leadership_authority(n)) { o->safe_auth_violations++; }
+            if (n->role != MOSAIK_ROLE_FOLLOWER) { o->safe_role_violations++; }
+        }
+        if (o->last_state[i] == MOSAIK_STATE_SAFE && n->state != MOSAIK_STATE_SAFE) { o->safe_exits++; }
+        if (mosaik_has_valid_leadership_authority(n) && n->state == MOSAIK_STATE_DEGRADED) {
+            o->leader_degraded_valid_seen = true;
+        }
+        if (n->state == MOSAIK_STATE_NOMINAL) {
+            o->steps_nominal[i]++;
+            if (o->first_degraded_ms[i] != 0u) { o->nominal_after_first_deg[i]++; }
+        }
+        if (n->state == MOSAIK_STATE_DEGRADED) {
+            o->steps_degraded[i]++;
+            if (o->first_degraded_ms[i] == 0u) {
+                o->first_degraded_ms[i] = g_bus.now_ms;
+                o->first_deg_run_open[i] = true;
+            }
+            if (o->first_deg_run_open[i]) { o->first_deg_run_len[i]++; }
+        } else if (o->first_deg_run_open[i]) {
+            o->first_deg_run_open[i] = false;
+        }
+        if (o->last_state[i] == MOSAIK_STATE_NOMINAL && n->state == MOSAIK_STATE_DEGRADED) { o->nom_to_deg[i]++; }
+        if (o->last_state[i] == MOSAIK_STATE_DEGRADED && n->state == MOSAIK_STATE_NOMINAL) { o->deg_to_nom[i]++; }
+        o->last_state[i] = n->state;
+    }
+    if (safe_n > o->max_safe_nodes) { o->max_safe_nodes = safe_n; }
+}
+
+static void traj_run(traj_obs_t *o, uint32_t ms)
+{
+    uint32_t k;
+    for (k = 0; k < ms; k++) { bus_step(); traj_step(o); }
+}
+
+/* Read-only recovery predicate: exactly one valid authority, every running
+ * non-SAFE node follows it with a heartbeat still inside its lease window,
+ * and no candidate exists. */
+static bool cluster_recovered(int *leader_out)
+{
+    int i, li = valid_leader_index();
+    if (valid_leader_count() != 1 || li < 0) { return false; }
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        if (g_bus.crashed[i] || !g_bus.powered[i] || n->state == MOSAIK_STATE_SAFE) { continue; }
+        if (i == li) { continue; }
+        if (n->role != MOSAIK_ROLE_FOLLOWER) { return false; }
+        if (n->leader_id != g_bus.node[li].id) { return false; }
+        if ((int32_t)(n->deadline_ms - g_bus.now_ms) <= 0) { return false; }
+    }
+    if (leader_out) { *leader_out = li; }
+    return true;
+}
+
+/* Targeted delivery of one adversarial frame to one node (TC-004 style). */
+static void deliver_to(int idx, const mosaik_msg_t *m)
+{
+    mosaik_frame_t f;
+    mosaik_encode(&f, m);
+    mosaik_on_rx(&g_bus.node[idx], g_bus.now_ms, &f);
+}
+
+static void make_msg(mosaik_msg_t *m, mosaik_msg_type_t type, uint8_t src,
+                     mosaik_role_t role, mosaik_state_t state, uint16_t term, uint8_t arg)
+{
+    memset(m, 0, sizeof(*m));
+    m->type = type; m->src = src; m->version = MOSAIK_PROTO_VERSION;
+    m->role = role; m->state = state; m->term = term; m->arg = arg;
+}
+
+/* Same-term dual-leader injection into the current leader, as TC-004 does.
+ * Returns the index of the node that latched SAFE, or -1. */
+static int split_brain_leader(void)
+{
+    int li = leader_index();
+    mosaik_msg_t m;
+    if (li < 0) { return -1; }
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(((li + 1) % N_NODES) + 1),
+             MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, g_bus.node[li].term, 0u);
+    deliver_to(li, &m);
+    return (g_bus.node[li].state == MOSAIK_STATE_SAFE) ? li : -1;
+}
+
+/* Cut or restore both directions between one node and every other node. */
+static void isolate_node(int idx, bool cut)
+{
+    int j;
+    for (j = 0; j < N_NODES; j++) {
+        if (j == idx) { continue; }
+        bus_set_net_action((uint8_t)idx, (uint8_t)j, cut ? NET_DROP : NET_DELIVER, 0u);
+        bus_set_net_action((uint8_t)j, (uint8_t)idx, cut ? NET_DROP : NET_DELIVER, 0u);
+    }
+}
+
+static void survivors_of(int li, int *a, int *b)
+{
+    int i; *a = -1; *b = -1;
+    for (i = 0; i < N_NODES; i++) { if (i == li) { continue; } if (*a < 0) { *a = i; } else { *b = i; } }
+}
+
+#define TX(idx, type) (g_bus.tx_count[(idx)][(int)(type)])
+
+/* TC-035: SAFE contract - no authority, SAFE-only transmission, and the
+ * cluster recovers around the SAFE node while the SAFE node itself does not. */
+static void tc_035_safe_no_authority_cluster_recovers(void)
+{
+    int li, a, b;
+    uint32_t t_safe, tx_safe0, tx_req0, tx_grant0, tx_hb0, tx_ack0;
+    traj_obs_t o;
+
+    printf("TC-035  SAFE node: no authority, SAFE-only transmission, cluster recovers around it [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE on same-term dual leader");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    t_safe = g_bus.now_ms;
+    tx_safe0 = TX(li, MOSAIK_MSG_SAFE); tx_req0 = TX(li, MOSAIK_MSG_VOTE_REQ);
+    tx_grant0 = TX(li, MOSAIK_MSG_VOTE_GRANT); tx_hb0 = TX(li, MOSAIK_MSG_HEARTBEAT); tx_ack0 = TX(li, MOSAIK_MSG_ACK);
+    traj_init(&o);
+    traj_run(&o, 3000u);
+
+    check(o.safe_auth_violations == 0u, "INV-SAFE-NO-AUTHORITY", "SAFE node never held valid leadership authority");
+    check(o.safe_role_violations == 0u, "REQ-SAFE-0003", "SAFE node never became candidate or leader");
+    check(TX(li, MOSAIK_MSG_SAFE) > tx_safe0, "REQ-SAFE-0003", "SAFE node kept announcing SAFE");
+    check(TX(li, MOSAIK_MSG_VOTE_REQ) == tx_req0 && TX(li, MOSAIK_MSG_VOTE_GRANT) == tx_grant0 &&
+          TX(li, MOSAIK_MSG_HEARTBEAT) == tx_hb0 && TX(li, MOSAIK_MSG_ACK) == tx_ack0,
+          "REQ-SAFE-0003", "SAFE node transmitted SAFE frames only");
+    check(o.first_valid_ms != 0u && o.first_valid_idx != li && o.first_valid_ms - t_safe < 1000u,
+          "REQ-FUNC-0004", "cluster elected a new valid leader around the SAFE node within 1000 ms");
+    check(g_bus.node[li].state == MOSAIK_STATE_SAFE && o.safe_exits == 0u, "INV-SAFE-LATCH",
+          "SAFE node itself did not recover");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        node %d SAFE at %u ms; new valid leader node %d at %u ms; SAFE frames emitted %u\n",
+           li + 1, t_safe, o.first_valid_idx + 1, o.first_valid_ms, TX(li, MOSAIK_MSG_SAFE) - tx_safe0);
+    (void)a; (void)b;
+}
+
+/* TC-036: SAFE node does not participate: no vote, no ACK, no candidacy. */
+static void tc_036_safe_non_participation(void)
+{
+    int li, a, b;
+    uint16_t term0, cluster_term;
+    uint32_t g0, k0, r0, h0;
+    mosaik_msg_t m;
+    traj_obs_t o;
+
+    printf("TC-036  SAFE node grants no vote, sends no ACK, never becomes candidate [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    bus_run(1000u);                                    /* survivors elect around it */
+    term0 = g_bus.node[li].term;
+    cluster_term = g_bus.node[a].term > g_bus.node[b].term ? g_bus.node[a].term : g_bus.node[b].term;
+    g0 = TX(li, MOSAIK_MSG_VOTE_GRANT); k0 = TX(li, MOSAIK_MSG_ACK);
+    r0 = TX(li, MOSAIK_MSG_VOTE_REQ);   h0 = TX(li, MOSAIK_MSG_HEARTBEAT);
+
+    make_msg(&m, MOSAIK_MSG_VOTE_REQ, (uint8_t)(a + 1), MOSAIK_ROLE_CANDIDATE, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(cluster_term + 1u), 0u);
+    deliver_to(li, &m);                                /* admissible higher-term vote request */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(a + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(cluster_term + 1u), 7u);
+    deliver_to(li, &m);                                /* admissible higher-term heartbeat */
+    traj_init(&o);
+    traj_run(&o, 1500u);                               /* long enough for any election timeout */
+
+    check(TX(li, MOSAIK_MSG_VOTE_GRANT) == g0, "REQ-SAFE-0003", "SAFE node granted no vote");
+    check(TX(li, MOSAIK_MSG_ACK) == k0, "REQ-SAFE-0003", "SAFE node acknowledged no heartbeat");
+    check(TX(li, MOSAIK_MSG_VOTE_REQ) == r0 && TX(li, MOSAIK_MSG_HEARTBEAT) == h0,
+          "REQ-SAFE-0003", "SAFE node started no election and sent no heartbeat");
+    check(g_bus.node[li].role == MOSAIK_ROLE_FOLLOWER && o.safe_role_violations == 0u,
+          "REQ-SAFE-0003", "SAFE node never became candidate or leader");
+    check(g_bus.node[li].term == term0, "INV-SAFE-LATCH", "SAFE node did not adopt the higher term");
+    check(g_bus.node[li].state == MOSAIK_STATE_SAFE && o.safe_exits == 0u, "INV-SAFE-LATCH", "still SAFE");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    printf("        SAFE node %d: term %u held, grants %u, acks %u, elections %u after admissible higher-term traffic\n",
+           li + 1, g_bus.node[li].term, TX(li, MOSAIK_MSG_VOTE_GRANT) - g0, TX(li, MOSAIK_MSG_ACK) - k0,
+           TX(li, MOSAIK_MSG_VOTE_REQ) - r0);
+}
+
+/* TC-037: SAFE latch against old-, same- and higher-term traffic, SAFE
+ * replays and connectivity changes: no implicit exit. */
+static void tc_037_safe_latch(void)
+{
+    int li, a, b;
+    uint16_t t0; uint8_t cause0;
+    mosaik_msg_t m;
+    traj_obs_t o;
+
+    printf("TC-037  SAFE latch: no frame, term or connectivity change clears SAFE [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    bus_run(1000u);
+    t0 = g_bus.node[li].term; cause0 = g_bus.node[li].safe_cause;
+    traj_init(&o);
+
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(a + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, (uint16_t)(t0 - 1u), 1u);
+    deliver_to(li, &m);                                            /* old term */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(a + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, t0, 2u);
+    deliver_to(li, &m);                                            /* same term */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(a + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, (uint16_t)(t0 + 5u), 3u);
+    deliver_to(li, &m);                                            /* higher term */
+    make_msg(&m, MOSAIK_MSG_VOTE_GRANT, (uint8_t)(a + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL, t0, (uint8_t)(li + 1));
+    deliver_to(li, &m);                                            /* grant addressed to it */
+    make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(b + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE, (uint16_t)(t0 + 1u), (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+    deliver_to(li, &m);                                            /* SAFE announce from a peer */
+    traj_step(&o);
+    isolate_node(li, true);  traj_run(&o, 500u);                   /* connectivity removed ... */
+    isolate_node(li, false); traj_run(&o, 1500u);                  /* ... and restored */
+
+    check(g_bus.node[li].state == MOSAIK_STATE_SAFE, "INV-SAFE-LATCH", "still SAFE after all traffic and connectivity changes");
+    check(g_bus.node[li].safe_cause == cause0, "INV-SAFE-LATCH", "SAFE cause unchanged");
+    check(g_bus.node[li].term == t0, "INV-SAFE-LATCH", "term unchanged by old, same or higher-term traffic");
+    check(g_bus.node[li].role == MOSAIK_ROLE_FOLLOWER, "INV-SAFE-NO-AUTHORITY", "role stays follower");
+    check(o.safe_exits == 0u && o.safe_auth_violations == 0u, "INV-SAFE-LATCH", "no implicit SAFE exit, no authority");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    printf("        SAFE node %d: term %u, cause %u held through old/same/higher-term frames, grant, SAFE replay, isolation and restore\n",
+           li + 1, g_bus.node[li].term, g_bus.node[li].safe_cause);
+}
+
+/* TC-038: SAFE is not propagated: genuine, replayed and forged SAFE frames
+ * never move a healthy peer into SAFE. */
+static void tc_038_safe_not_propagated(void)
+{
+    int li, a, b;
+    uint32_t k;
+    mosaik_msg_t m; mosaik_frame_t f;
+    traj_obs_t o;
+
+    printf("TC-038  SAFE frames do not propagate SAFE to healthy peers [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    traj_init(&o);
+    for (k = 0; k < 3000u; k++) {
+        if (k % 500u == 250u) {                                    /* replayed SAFE from the SAFE node */
+            make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(li + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE,
+                     g_bus.node[li].term, (uint8_t)MOSAIK_SAFE_SPLIT_BRAIN);
+            mosaik_encode(&f, &m); bus_inject_frame(&f, (uint8_t)(li + 1));
+        }
+        if (k == 1200u) {                                          /* forged SAFE attributed to survivor a */
+            make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(a + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE,
+                     g_bus.node[a].term, (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+            mosaik_encode(&f, &m); bus_inject_frame(&f, (uint8_t)(a + 1));
+        }
+        bus_step(); traj_step(&o);
+    }
+    check(o.max_safe_nodes == 1u, "REQ-SAFE-0001", "only the faulted node was ever SAFE");
+    check(g_bus.node[a].state != MOSAIK_STATE_SAFE && g_bus.node[b].state != MOSAIK_STATE_SAFE,
+          "REQ-SAFE-0001", "survivors never entered SAFE from SAFE frames");
+    check(valid_leader_count() == 1 && valid_leader_index() != li, "REQ-FUNC-0001", "one valid leader among the survivors");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        SAFE nodes max %u, survivors states %d/%d, valid leader node %d\n",
+           o.max_safe_nodes, (int)g_bus.node[a].state, (int)g_bus.node[b].state, valid_leader_index() + 1);
+}
+
+/* TC-039: DEGRADED persistence while fresh SAFE evidence exists (REQ-SAFE-0004).
+ * EXPECTED RED on 76f10d9: an accepted heartbeat unconditionally sets NOMINAL,
+ * so followers flap DEGRADED/NOMINAL every heartbeat while the peer is SAFE. */
+static void tc_039_degraded_persistence(void)
+{
+    int li, a, b, i;
+    uint32_t t_safe, tx_safe0;
+    traj_obs_t o;
+
+    printf("TC-039  DEGRADED persists while a peer's SAFE evidence is fresh, no flapping [Lot 3, REQ-SAFE-0004]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    t_safe = g_bus.now_ms; tx_safe0 = TX(li, MOSAIK_MSG_SAFE);
+    traj_init(&o);
+    traj_run(&o, 3000u);
+
+    check(TX(li, MOSAIK_MSG_SAFE) - tx_safe0 >= 25u, "Lot 3", "SAFE evidence was broadcast throughout (>= 25 SAFE frames in 3 s)");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == li) { continue; }
+        check(o.first_degraded_ms[i] != 0u && o.first_degraded_ms[i] - t_safe <= 200u, "REQ-SAFE-0004",
+              "survivor entered DEGRADED on the peer's SAFE announcement");
+        check(o.deg_to_nom[i] == 0u, "REQ-SAFE-0004",
+              "no DEGRADED->NOMINAL transition while SAFE evidence stayed fresh (no heartbeat-induced flapping)");
+        check(o.nominal_after_first_deg[i] == 0u, "REQ-SAFE-0004",
+              "survivor was DEGRADED at every step after the first SAFE announcement");
+    }
+    check(o.first_valid_ms != 0u && o.first_valid_idx != li, "REQ-FUNC-0004", "survivors still elected a valid leader");
+    check(o.leader_degraded_valid_seen, "REQ-SAFE-0004", "leader retained valid authority while DEGRADED");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        survivors DEGRADED->NOMINAL transitions: node%d=%u node%d=%u; NOMINAL steps after first DEGRADED: %u/%u\n",
+           a + 1, o.deg_to_nom[a], b + 1, o.deg_to_nom[b], o.nominal_after_first_deg[a], o.nominal_after_first_deg[b]);
+}
+
+/* TC-040: SAFE evidence expires only when the SAFE node stops announcing
+ * (here: cold restart); survivors then return to NOMINAL; the SAFE node
+ * recovers only through the cold restart.
+ * EXPECTED RED on 76f10d9: a leader never leaves DEGRADED. */
+static void tc_040_degraded_expiry_and_return_to_nominal(void)
+{
+    int li, a, b, lead_before;
+    uint16_t term_before;
+    traj_obs_t o;
+
+    printf("TC-040  SAFE evidence expiry, return to NOMINAL, SAFE node recovers only by cold restart [Lot 3, REQ-SAFE-0004]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "REQ-SAFE-0003", "leader latched SAFE");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    traj_init(&o);
+    traj_run(&o, 3000u);
+    check(g_bus.node[li].state == MOSAIK_STATE_SAFE && o.safe_exits == 0u, "INV-SAFE-LATCH",
+          "SAFE node did not recover by itself in 3 s");
+    lead_before = valid_leader_index(); term_before = (lead_before >= 0) ? g_bus.node[lead_before].term : 0u;
+    check(lead_before >= 0, "REQ-FUNC-0001", "a valid leader exists among the survivors");
+
+    bus_crash_node(li);                     /* SAFE announcements stop */
+    traj_run(&o, 600u);                     /* evidence window (3 heartbeat periods) + one heartbeat + margin */
+    check(g_bus.node[a].state == MOSAIK_STATE_NOMINAL, "REQ-SAFE-0004",
+          "survivor a returned to NOMINAL after SAFE evidence expired");
+    check(g_bus.node[b].state == MOSAIK_STATE_NOMINAL, "REQ-SAFE-0004",
+          "survivor b returned to NOMINAL after SAFE evidence expired");
+
+    bus_restart_node(li);                   /* cold restart: new volatile instance */
+    traj_run(&o, 1500u);
+    check(g_bus.node[li].state == MOSAIK_STATE_NOMINAL && g_bus.node[li].role == MOSAIK_ROLE_FOLLOWER,
+          "Lot 3", "cold-restarted node rejoined as NOMINAL follower");
+    check(lead_before >= 0 && valid_leader_index() == lead_before && g_bus.node[lead_before].term == term_before,
+          "REQ-FUNC-0001", "leader and term unchanged across the SAFE node's cold restart");
+    check(g_bus.node[li].term == term_before, "Lot 3", "restarted node adopted the cluster term");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression (restart excluded)");
+    printf("        after evidence expiry: node%d state %d, node%d state %d; restarted node %d state %d term %u\n",
+           a + 1, (int)g_bus.node[a].state, b + 1, (int)g_bus.node[b].state, li + 1, (int)g_bus.node[li].state, g_bus.node[li].term);
+}
+
+/* TC-041: election exhaustion is terminal; restored connectivity does not
+ * recover a SAFE node (INV-SAFE-LATCH) and no authority exists without quorum. */
+static void tc_041_election_exhaustion_terminal(void)
+{
+    int li, a, b, i;
+    uint32_t nonsafe_tx0[N_NODES], nonsafe_tx1[N_NODES];
+    traj_obs_t o;
+
+    printf("TC-041  election exhaustion -> SAFE/NO_QUORUM is terminal even after connectivity returns [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    isolate_node(a, true);  bus_run(2000u);
+    check(g_bus.node[a].state == MOSAIK_STATE_SAFE && g_bus.node[a].safe_cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM,
+          "REQ-SAFE-0003", "isolated follower exhausted elections and latched SAFE/no-quorum");
+    isolate_node(b, true);  bus_run(2500u);
+    check(g_bus.node[b].state == MOSAIK_STATE_SAFE && g_bus.node[li].state == MOSAIK_STATE_SAFE,
+          "REQ-FUNC-0002", "with quorum unreachable the remaining nodes latched SAFE");
+    for (i = 0; i < N_NODES; i++) {
+        nonsafe_tx0[i] = TX(i, MOSAIK_MSG_VOTE_REQ) + TX(i, MOSAIK_MSG_VOTE_GRANT) + TX(i, MOSAIK_MSG_HEARTBEAT) + TX(i, MOSAIK_MSG_ACK);
+    }
+    bus_set_full_connectivity();
+    traj_init(&o);
+    traj_run(&o, 3000u);
+    for (i = 0; i < N_NODES; i++) {
+        nonsafe_tx1[i] = TX(i, MOSAIK_MSG_VOTE_REQ) + TX(i, MOSAIK_MSG_VOTE_GRANT) + TX(i, MOSAIK_MSG_HEARTBEAT) + TX(i, MOSAIK_MSG_ACK);
+        check(g_bus.node[i].state == MOSAIK_STATE_SAFE, "INV-SAFE-LATCH", "node remained SAFE after connectivity was restored");
+        check(o.max_failed[i] == g_bus.node[i].cfg.max_failed_elections, "REQ-SAFE-0003",
+              "SAFE reached through exactly max_failed_elections genuine failures");
+        check(nonsafe_tx1[i] == nonsafe_tx0[i], "REQ-SAFE-0003", "no election, vote, heartbeat or ACK traffic after restore");
+    }
+    check(o.safe_exits == 0u, "INV-SAFE-LATCH", "no SAFE exit");
+    check(o.max_valid == 0u, "INV-SAFE-NO-AUTHORITY", "no valid authority after cluster-wide SAFE");
+    printf("        all three nodes SAFE/no-quorum, terms %u/%u/%u, no recovery after restore\n",
+           g_bus.node[0].term, g_bus.node[1].term, g_bus.node[2].term);
+}
+
+/* TC-042: isolation duration boundary. Short isolations recover with the
+ * recovered predicate; long ones latch. Timings are host observations only. */
+static void tc_042_isolation_boundary(void)
+{
+    static const uint32_t durs[5] = {600u, 900u, 1200u, 1500u, 2000u};
+    int d, latched_before = 0;
+    bool monotonic = true;
+
+    printf("TC-042  leader isolation boundary: recovery below the timer budget, latch above [Lot 3]\n");
+    for (d = 0; d < 5; d++) {
+        int li, lo = -1; bool rec; traj_obs_t o;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { check(false, "Lot 3", "leader existed"); return; }
+        isolate_node(li, true);  bus_run(durs[d]);
+        isolate_node(li, false);
+        traj_init(&o); traj_run(&o, 3000u);
+        rec = cluster_recovered(&lo) && g_bus.node[li].state != MOSAIK_STATE_SAFE;
+        check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1 during isolation and recovery");
+        check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+        if (g_bus.node[li].state == MOSAIK_STATE_SAFE) {
+            check(o.max_failed[li] == g_bus.node[li].cfg.max_failed_elections, "REQ-SAFE-0003", "latch only through genuine failures");
+            latched_before = 1;
+        } else {
+            check(rec, "INV-RECOVERY-VERIFIED", "isolated leader rejoined and the cluster satisfies the recovered predicate");
+            if (latched_before) { monotonic = false; }
+        }
+        if (d == 0) { check(rec, "REQ-FUNC-0004", "600 ms isolation recovers without SAFE"); }
+        if (d == 4) { check(g_bus.node[li].state == MOSAIK_STATE_SAFE, "REQ-SAFE-0003", "2000 ms isolation latches SAFE"); }
+        printf("        isolation %4u ms: %s (old leader term %u, state %d, valid leader node %d)\n",
+               durs[d], rec ? "RECOVERED" : (g_bus.node[li].state == MOSAIK_STATE_SAFE ? "LATCHED SAFE" : "NOT RECOVERED"),
+               g_bus.node[li].term, (int)g_bus.node[li].state, lo + 1);
+    }
+    check(monotonic, "Lot 3", "once a duration latches SAFE, every longer duration latches too");
+}
+
+/* TC-043: malformed traffic is detection-only (D2): counted, never acted on. */
+static void tc_043_malformed_detection_only(void)
+{
+    int li, i, k;
+    uint16_t terms[N_NODES];
+    uint32_t de0[N_NODES];
+    mosaik_msg_t m; mosaik_frame_t bad;
+    traj_obs_t o;
+
+    printf("TC-043  malformed frames: decode errors counted, no state, term or authority change [Lot 3, D2]\n");
+    bus_init(); bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "Lot 3", "valid leader existed");
+    if (li < 0) { return; }
+    for (i = 0; i < N_NODES; i++) { terms[i] = g_bus.node[i].term; de0[i] = g_bus.node[i].decode_errors; }
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, 3u, MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, 99u, 1u);
+    mosaik_encode(&bad, &m);
+    bad.data[7] ^= 0x5Au;                                  /* CRC broken */
+    traj_init(&o);
+    for (k = 0; k < 50; k++) { bus_inject_frame(&bad, 3u); traj_run(&o, 10u); }
+    for (i = 0; i < N_NODES; i++) {
+        if (i == 2) { continue; }                          /* the claimed source skips its own frame */
+        check(g_bus.node[i].decode_errors == de0[i] + 50u, "REQ-FUNC-0007", "each corrupted frame was detected and counted");
+        check(g_bus.node[i].term == terms[i], "INV-TERM-MONOTONIC", "term unchanged by corrupted frames");
+        check(g_bus.node[i].state != MOSAIK_STATE_SAFE, "D2", "no SAFE transition from corrupted traffic (PROTO_ERROR reserved)");
+    }
+    check(valid_leader_index() == li, "REQ-FUNC-0001", "valid leader unchanged");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    printf("        50 corrupted frames: decode_errors %u->%u on node 1, states %d/%d/%d\n",
+           de0[0], g_bus.node[0].decode_errors, (int)g_bus.node[0].state, (int)g_bus.node[1].state, (int)g_bus.node[2].state);
+}
+
+/* TC-044: crash during recovery. After a natural collision the survivors back
+ * off; one of them crashes; the lone node exhausts genuine elections. */
+static void tc_044_crash_during_recovery(void)
+{
+    int li, a, b, k;
+    uint32_t shared_deadline = 0u, crash_ms = 0u;
+    uint16_t term_before = 0u;
+    crash_obs_t co;
+    traj_obs_t o;
+
+    printf("TC-044  crash of a survivor during collision recovery: lone node reaches SAFE/no-quorum [Lot 3]\n");
+    bus_init();
+    li = collision_prologue("Lot 3", &shared_deadline, &crash_ms, &term_before);
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    obs_init(&co, li);
+    for (k = 0; k < 1000 && !(g_bus.node[a].failed_elections >= 1u && g_bus.node[b].failed_elections >= 1u); k++) {
+        bus_step(); obs_step(&co);
+    }
+    check(co.split_vote_seen && g_bus.node[a].failed_elections >= 1u, "Lot 3", "natural collision and first failed election observed");
+    bus_crash_node(b);                                     /* crash during the backoff */
+    traj_init(&o);
+    traj_run(&o, 3000u);
+    check(g_bus.node[a].state == MOSAIK_STATE_SAFE && g_bus.node[a].safe_cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM,
+          "REQ-FUNC-0002", "lone survivor latched SAFE/no-quorum");
+    check(o.max_failed[a] == g_bus.node[a].cfg.max_failed_elections, "REQ-SAFE-0003", "SAFE only through genuine failed elections");
+    check(o.max_valid == 0u, "INV-LEADER-UNIQUE", "no authority was ever manufactured");
+    check(o.safe_auth_violations == 0u, "INV-SAFE-NO-AUTHORITY", "SAFE node holds no authority");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        collision at %u, survivor %d crashed during backoff, node %d SAFE at term %u\n",
+           shared_deadline, b + 1, a + 1, g_bus.node[a].term);
+}
+
+/* TC-045: replayed old SAFE evidence degrades the receiver for exactly one
+ * evidence window (3 heartbeat periods) and only nodes that actually received
+ * it; no indefinite degradation, no topology knowledge.
+ * EXPECTED RED on 76f10d9: the receiver flips back to NOMINAL on the next heartbeat. */
+static void tc_045_replayed_safe_evidence_bounded(void)
+{
+    int li, a, b;
+    mosaik_msg_t m; mosaik_frame_t f;
+    traj_obs_t o;
+
+    printf("TC-045  replayed SAFE evidence: bounded DEGRADED window, local evidence only [Lot 3, REQ-SAFE-0004]\n");
+    bus_init(); bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "Lot 3", "valid leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    /* A stale SAFE frame attributed to follower a reaches follower b only. */
+    make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(a + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE,
+             g_bus.node[a].term, (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+    mosaik_encode(&f, &m);
+    bus_set_net_action((uint8_t)a, (uint8_t)li, NET_DROP, 0u);
+    bus_inject_frame(&f, (uint8_t)(a + 1));
+    traj_init(&o);
+    traj_run(&o, 1u);
+    bus_set_net_action((uint8_t)a, (uint8_t)li, NET_DELIVER, 0u);
+    traj_run(&o, 1000u);
+
+    check(o.first_degraded_ms[b] != 0u, "REQ-SAFE-0004", "receiver entered DEGRADED on the SAFE evidence");
+    check(o.first_deg_run_len[b] >= 300u, "REQ-SAFE-0004",
+          "receiver stayed DEGRADED for the full evidence window (3 heartbeat periods)");
+    check(o.first_deg_run_len[b] <= 450u && g_bus.node[b].state == MOSAIK_STATE_NOMINAL, "REQ-SAFE-0004",
+          "replayed evidence cannot create indefinite degradation");
+    check(o.steps_degraded[li] == 0u, "INV-FDIR-NO-MAGIC", "node that never received the frame never degraded");
+    check(o.steps_degraded[a] == 0u && g_bus.node[a].state != MOSAIK_STATE_SAFE, "INV-FDIR-NO-MAGIC",
+          "impersonated node unaffected by a frame it never received");
+    check(o.max_safe_nodes == 0u, "REQ-SAFE-0001", "nobody entered SAFE");
+    check(valid_leader_index() == li && o.max_valid <= 1u, "INV-LEADER-UNIQUE", "authority unchanged and unique");
+    printf("        receiver node %d DEGRADED run %u ms, final state %d; non-receivers degraded %u/%u steps\n",
+           b + 1, o.first_deg_run_len[b], (int)g_bus.node[b].state, o.steps_degraded[li], o.steps_degraded[a]);
+}
+
+/* TC-046: repeated transient faults recover every time without SAFE. */
+static void tc_046_repeated_transient_faults(void)
+{
+    int cycle, li, lo, i;
+    traj_obs_t o;
+
+    printf("TC-046  three transient leader isolations recover each time without SAFE [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    traj_init(&o);
+    for (cycle = 0; cycle < 3; cycle++) {
+        li = leader_index();
+        check(li >= 0, "Lot 3", "leader existed at cycle start");
+        if (li < 0) { return; }
+        isolate_node(li, true);  traj_run(&o, 800u);
+        isolate_node(li, false); traj_run(&o, 2000u);
+        check(cluster_recovered(&lo), "INV-RECOVERY-VERIFIED", "cluster satisfies the recovered predicate after the transient fault");
+    }
+    for (i = 0; i < N_NODES; i++) {
+        check(g_bus.node[i].state != MOSAIK_STATE_SAFE, "Lot 3", "no node entered SAFE across repeated transient faults");
+        check(o.max_failed[i] < g_bus.node[i].cfg.max_failed_elections, "Lot 3", "no node exhausted its elections");
+    }
+    check(o.max_safe_nodes == 0u, "REQ-SAFE-0001", "no SAFE at any step");
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        three 800 ms isolations recovered; final valid leader node %d term %u, max failed elections %u/%u/%u\n",
+           valid_leader_index() + 1, valid_leader_index() >= 0 ? g_bus.node[valid_leader_index()].term : 0u,
+           o.max_failed[0], o.max_failed[1], o.max_failed[2]);
+}
+
+/* TC-047: adversarial combination A: split-brain SAFE on the leader, a delayed
+ * old-term heartbeat replay, and a one-way drop during the survivors' election.
+ * EXPECTED RED on 76f10d9 through the DEGRADED persistence requirement. */
+static void tc_047_adversarial_safe_replay_oneway(void)
+{
+    int li, a, b, i;
+    uint16_t t_old;
+    uint32_t stale0;
+    mosaik_msg_t m; mosaik_frame_t f;
+    traj_obs_t o;
+
+    printf("TC-047  adversarial: leader SAFE + delayed old-term heartbeat replay + one-way drop during election [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    if (li < 0) { check(false, "Lot 3", "leader existed"); return; }
+    t_old = g_bus.node[li].term;
+    survivors_of(li, &a, &b);
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(li + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, t_old, 200u);
+    mosaik_encode(&f, &m);
+    check(split_brain_leader() == li, "REQ-SAFE-0003", "leader latched SAFE");
+    (void)bus_schedule_delayed(&f, (uint8_t)(li + 1), 700u);     /* stale heartbeat of the now-SAFE leader */
+    stale0 = g_bus.node[a].stale_term_rejections + g_bus.node[b].stale_term_rejections;
+    traj_init(&o);
+    traj_run(&o, 400u);
+    bus_set_net_action((uint8_t)a, (uint8_t)b, NET_DROP, 0u);      /* one-way loss during the election window */
+    traj_run(&o, 200u);
+    bus_set_net_action((uint8_t)a, (uint8_t)b, NET_DELIVER, 0u);
+    traj_run(&o, 2400u);
+
+    check(valid_leader_count() == 1 && valid_leader_index() != li, "REQ-FUNC-0001", "exactly one valid leader among the survivors");
+    check(g_bus.node[a].stale_term_rejections + g_bus.node[b].stale_term_rejections > stale0, "REQ-FUNC-0001",
+          "delayed old-term heartbeat was rejected as stale");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    check(o.max_safe_nodes == 1u && g_bus.node[li].state == MOSAIK_STATE_SAFE, "INV-SAFE-LATCH", "only the leader is SAFE and stays SAFE");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == li) { continue; }
+        check(o.nominal_after_first_deg[i] == 0u, "REQ-SAFE-0004",
+              "survivor stayed DEGRADED throughout the fresh SAFE evidence despite adversarial traffic");
+    }
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    printf("        valid leader node %d term %u; stale rejections +%u; NOMINAL steps after DEGRADED %u/%u\n",
+           valid_leader_index() + 1, valid_leader_index() >= 0 ? g_bus.node[valid_leader_index()].term : 0u,
+           g_bus.node[a].stale_term_rejections + g_bus.node[b].stale_term_rejections - stale0,
+           o.nominal_after_first_deg[a], o.nominal_after_first_deg[b]);
+}
+
+/* TC-048: adversarial combination B: leader crash at a natural shared deadline,
+ * then a delayed SAFE frame attributed to the crashed leader arrives during the
+ * survivors' backoff. Recovery must be unaffected; DEGRADED per evidence.
+ * EXPECTED RED on 76f10d9 through the DEGRADED window requirement. */
+static void tc_048_adversarial_crash_collision_safe_frame(void)
+{
+    int li, a, b, k, i;
+    uint32_t shared_deadline = 0u, crash_ms = 0u;
+    uint16_t term_before = 0u;
+    mosaik_msg_t m; mosaik_frame_t f;
+    crash_obs_t co;
+    traj_obs_t o;
+
+    printf("TC-048  adversarial: leader crash + natural collision + delayed SAFE frame during backoff [Lot 3]\n");
+    bus_init();
+    li = collision_prologue("Lot 3", &shared_deadline, &crash_ms, &term_before);
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    obs_init(&co, li);
+    for (k = 0; k < 1000 && !(g_bus.node[a].failed_elections >= 1u && g_bus.node[b].failed_elections >= 1u); k++) {
+        bus_step(); obs_step(&co);
+    }
+    check(co.split_vote_seen, "Lot 3", "natural collision observed");
+    make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(li + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE, term_before,
+             (uint8_t)MOSAIK_SAFE_SPLIT_BRAIN);
+    mosaik_encode(&f, &m);
+    bus_inject_frame(&f, (uint8_t)(li + 1));                 /* delayed SAFE frame of the crashed leader */
+    traj_init(&o);
+    traj_run(&o, 3000u);
+
+    check(o.first_valid_ms != 0u && o.first_valid_ms - crash_ms < 1000u, "REQ-FUNC-0004",
+          "recovery completed within 1000 ms of the crash despite the SAFE frame");
+    check(o.max_safe_nodes == 0u, "REQ-SAFE-0001", "no survivor entered SAFE");
+    for (i = 0; i < N_NODES; i++) {
+        if (i == li) { continue; }
+        check(o.first_degraded_ms[i] != 0u, "REQ-SAFE-0004", "survivor degraded on the received SAFE evidence");
+        check(o.first_deg_run_len[i] >= 300u, "REQ-SAFE-0004",
+              "survivor stayed DEGRADED for the full evidence window, including across becoming leader or accepting heartbeats");
+        check(o.first_deg_run_len[i] <= 450u && g_bus.node[i].state == MOSAIK_STATE_NOMINAL, "REQ-SAFE-0004",
+              "survivor returned to NOMINAL once the single SAFE frame's evidence expired");
+    }
+    check(o.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(o.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        valid leader node %d at %u ms (%u ms after crash); DEGRADED runs %u/%u ms\n",
+           o.first_valid_idx + 1, o.first_valid_ms, o.first_valid_ms - crash_ms, o.first_deg_run_len[a], o.first_deg_run_len[b]);
+}
+
+/* TC-049: deterministic reproducibility of a LOT 3 scenario. */
+static uint32_t lot3_trajectory_hash(void)
+{
+    uint32_t h = 2166136261u, k; int li, i;
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    if (li < 0) { return 0u; }
+    for (k = 0; k < 3000u; k++) {
+        bus_step();
+        for (i = 0; i < N_NODES; i++) {
+            const mosaik_node_t *n = &g_bus.node[i];
+            uint32_t v = ((uint32_t)n->role << 24) | ((uint32_t)n->state << 16) | ((uint32_t)n->term << 1) |
+                         (mosaik_has_valid_leadership_authority(n) ? 1u : 0u);
+            h ^= v; h *= 16777619u;
+        }
+    }
+    return h;
+}
+
+static void tc_049_reproducibility(void)
+{
+    uint32_t h1, h2;
+    printf("TC-049  deterministic reproducibility of the SAFE/DEGRADED scenario [Lot 3]\n");
+    h1 = lot3_trajectory_hash();
+    h2 = lot3_trajectory_hash();
+    check(h1 != 0u && h1 == h2, "Lot 3", "two runs of the same scenario produce identical per-step trajectories");
+    printf("        trajectory hash 0x%08X reproduced\n", h1);
+}
+
+/* TC-050: LOT 2 erratum (D5): vote memory must never be erased by a role
+ * transition within the same term. A leader whose lease expires steps down in
+ * the SAME term; a same-term VOTE_REQ delivered afterwards must not be granted.
+ * A strictly higher-term VOTE_REQ must still be granted (contrast).
+ * EXPECTED RED on 76f10d9: become_follower() clears voted_for. */
+static void tc_050_same_term_vote_memory_across_step_down(void)
+{
+    int li, c, d, k;
+    uint8_t vf_before, vf_after; uint16_t vt_before, vt_after, term_lead;
+    uint32_t g0, g1;
+    mosaik_msg_t m; mosaik_frame_t f;
+    bool stepped = false;
+
+    printf("TC-050  one vote per term across a same-term step-down (LOT 2 erratum, D5) [Lot 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &c, &d);
+    term_lead = g_bus.node[li].term;
+    check(g_bus.node[li].voted_for == g_bus.node[li].id && g_bus.node[li].voted_term == term_lead,
+          "Lot 3", "leader holds its own vote for the current term");
+
+    /* Legitimate ACK loss: followers -> leader dropped; lease expires; same-term step-down. */
+    bus_set_net_action((uint8_t)c, (uint8_t)li, NET_DROP, 0u);
+    bus_set_net_action((uint8_t)d, (uint8_t)li, NET_DROP, 0u);
+    vf_before = g_bus.node[li].voted_for; vt_before = g_bus.node[li].voted_term;
+    for (k = 0; k < 1500 && !stepped; k++) {
+        bus_step();
+        if (g_bus.node[li].role != MOSAIK_ROLE_LEADER) { stepped = true; }
+    }
+    vf_after = g_bus.node[li].voted_for; vt_after = g_bus.node[li].voted_term;
+    check(stepped && g_bus.node[li].term == term_lead, "Lot 3", "leader stepped down to follower in the SAME term after lease expiry");
+    check(vf_after == vf_before && vt_after == vt_before, "INV-ONE-VOTE-PER-TERM",
+          "vote memory (voted_for, voted_term) survived the same-term role transition");
+
+    /* Same-term VOTE_REQ delivered through the bus. */
+    bus_set_full_connectivity();
+    make_msg(&m, MOSAIK_MSG_VOTE_REQ, (uint8_t)(c + 1), MOSAIK_ROLE_CANDIDATE, MOSAIK_STATE_NOMINAL, term_lead, 0u);
+    mosaik_encode(&f, &m);
+    g0 = TX(li, MOSAIK_MSG_VOTE_GRANT);
+    bus_inject_frame(&f, (uint8_t)(c + 1));
+    bus_step();
+    check(TX(li, MOSAIK_MSG_VOTE_GRANT) == g0, "INV-ONE-VOTE-PER-TERM",
+          "no VOTE_GRANT for a term in which the node already voted");
+    check(g_bus.node[li].voted_for == vf_before && g_bus.node[li].voted_term == vt_before, "INV-ONE-VOTE-PER-TERM",
+          "same-term vote request did not change vote memory");
+
+    /* Contrast: a strictly higher-term VOTE_REQ resets eligibility and is granted. */
+    make_msg(&m, MOSAIK_MSG_VOTE_REQ, (uint8_t)(c + 1), MOSAIK_ROLE_CANDIDATE, MOSAIK_STATE_NOMINAL, (uint16_t)(term_lead + 1u), 0u);
+    mosaik_encode(&f, &m);
+    g1 = TX(li, MOSAIK_MSG_VOTE_GRANT);
+    bus_inject_frame(&f, (uint8_t)(c + 1));
+    bus_step();
+    check(TX(li, MOSAIK_MSG_VOTE_GRANT) == g1 + 1u, "Lot 3", "strictly higher-term vote request granted");
+    check(g_bus.node[li].voted_for == (uint8_t)(c + 1) && g_bus.node[li].voted_term == (uint16_t)(term_lead + 1u),
+          "Lot 3", "vote memory now records the higher-term vote");
+    check(g_bus.node[li].term == (uint16_t)(term_lead + 1u), "INV-TERM-MONOTONIC", "term advanced to the higher term");
+    printf("        former leader %d: vote (%u,%u) before step-down, (%u,%u) after; same-term grants %u; higher-term grants %u\n",
+           li + 1, vf_before, vt_before, vf_after, vt_after, TX(li, MOSAIK_MSG_VOTE_GRANT) - g0 - (TX(li, MOSAIK_MSG_VOTE_GRANT) - g1),
+           TX(li, MOSAIK_MSG_VOTE_GRANT) - g1);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -2586,6 +3413,24 @@ int main(void)
     tc_032_permanent_contention_safe_contract();
     tc_033_asymmetric_partition_during_retry();
     tc_034_stale_delayed_election_traffic();
+
+    /* LOT 3: FDIR / SAFE evidence (Phase 1 RED baseline) */
+    tc_035_safe_no_authority_cluster_recovers();
+    tc_036_safe_non_participation();
+    tc_037_safe_latch();
+    tc_038_safe_not_propagated();
+    tc_039_degraded_persistence();
+    tc_040_degraded_expiry_and_return_to_nominal();
+    tc_041_election_exhaustion_terminal();
+    tc_042_isolation_boundary();
+    tc_043_malformed_detection_only();
+    tc_044_crash_during_recovery();
+    tc_045_replayed_safe_evidence_bounded();
+    tc_046_repeated_transient_faults();
+    tc_047_adversarial_safe_replay_oneway();
+    tc_048_adversarial_crash_collision_safe_frame();
+    tc_049_reproducibility();
+    tc_050_same_term_vote_memory_across_step_down();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
