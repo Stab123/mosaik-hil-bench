@@ -1171,6 +1171,7 @@ static void tc_016_delay_around_lease_boundary(void)
         /* Capture and inject a heartbeat at this offset */
         mosaik_msg_t msg;
         mosaik_frame_t frame;
+        uint16_t term_before = g_bus.node[leader_idx].term;
         msg.type = MOSAIK_MSG_HEARTBEAT;
         msg.src = (uint8_t)(leader_idx + 1);
         msg.version = MOSAIK_PROTO_VERSION;
@@ -1195,8 +1196,8 @@ static void tc_016_delay_around_lease_boundary(void)
             }
         } else {
             /* Before expiry: may renew if within lease */
-            /* Just verify no term regression */
-            check(g_bus.node[leader_idx].term >= 0, "Lot 2C",
+            /* Verify no term regression: term must not decrease after injection */
+            check(g_bus.node[leader_idx].term >= term_before, "Lot 2C",
                   "no term regression at offset");
         }
     }
@@ -1245,13 +1246,14 @@ static void tc_017_message_reordering(void)
     mosaik_encode(&frame2, &msg2);
 
     /* Deliver M2 first (newer), then M1 (older) - reorder */
+    uint16_t term_before = g_bus.node[leader_idx].term;
     bus_inject_frame(&frame2, msg2.src);
     bus_step();
     bus_inject_frame(&frame1, msg1.src);
     bus_step();
 
     /* Verify: processing M2 before M1 does not roll state backwards */
-    check(g_bus.node[leader_idx].term == g_bus.node[leader_idx].term, "Lot 2C",
+    check(g_bus.node[leader_idx].term >= term_before, "Lot 2C",
           "no term regression from reordering");
     check(mosaik_has_valid_leadership_authority(&g_bus.node[leader_idx]), "Lot 2C",
           "valid authority maintained");
