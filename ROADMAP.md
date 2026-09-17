@@ -1,7 +1,7 @@
 # MOSAÏK Development Roadmap
 
 **Document:** MOSAIK-ROADMAP-001  
-**Issue:** 1.2 — 16 September 2026  
+**Issue:** 1.3 — 17 September 2026  
 **Parent:** MOSAIK-ADD-0001 (Issue 1 / Rev 1, dated 24 April 2026)
 
 ---
@@ -26,7 +26,7 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 | **LOT 2C** | Asymmetric Partitions, Loss, Delay, Reorder | Directional fault model (deliver/drop/delay/reorder), ACK-based lease evidence, TC-013–TC-020 | **IMPLEMENTED (host sim)** — no dedicated report yet |
 | **LOT 2D** | Crash/Restart/Recovery | Crash and cold-restart models, candidate retry backoff after split vote, TC-021–TC-034 | **IMPLEMENTED (host sim)** — persistent terms NOT implemented (cold restart only) |
 | **LOT 3** | FDIR and SAFE | SAFE contract, DEGRADED from received peer SAFE evidence, recovery around a SAFE node, TC-035–TC-050; PROTO_ERROR policy, local fault input, SAFE_ASSERT and PGA deferred | **IMPLEMENTED (host sim)** |
-| **LOT 4** | MOSAÏK System Mode State Machine | INIT, NOMINAL, ADAPTIVE, DEGRADED, SAFE, PGA | NOT STARTED |
+| **LOT 4** | Local Mode Semantics (four-state host model) | INIT, NOMINAL, DEGRADED, SAFE × FOLLOWER, CANDIDATE, LEADER: election does not degrade (C1), SAFE announcement term is not consensus evidence (C2), state metadata non-authoritative, TC-051–TC-060; ADAPTIVE and PGA dependency-blocked, deferred to MOSAÏK Advanced | **IMPLEMENTED (host sim)** |
 | **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes | NOT STARTED |
 | **LOT 6** | CAN-FD / Communications / ICD | Physical layer, bitrates, ICD, bus-off handling | NOT STARTED |
 | **LOT 7** | Embedded Services | Logger, time, file system, health monitoring | NOT STARTED |
@@ -92,17 +92,19 @@ All evidence in this repository uses these classifications:
 
 ---
 
-## 6. Current Baseline (LOT 2A through LOT 3)
+## 6. Current Baseline (LOT 2A through LOT 4)
 
-**Verified commit:** `7df0af01d6ae2120bce9a5c6378305e3ef7eeb5c`  
+**Verified commit:** `ae9e408a50d6f80257f77fa245247741295c0b7d`  
 **Branch:** `lot2c-network-adversarial`  
-**Tests:** 50 test cases (TC-001 through TC-050)  
-**Checks:** 360 checks, 0 failures  
+**Tests:** 60 test cases (TC-001 through TC-060)  
+**Checks:** 455 checks, 0 failures  
 **Compiler:** `-std=c99 -Wall -Wextra -Werror -O1` PASS  
 **Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS, 0 findings  
 **Invariants:** maximum concurrent valid authorities 1; term regressions 0  
-**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0; `76f10d9` LOT 2 closure; `af5da87` LOT 3 RED baseline 360 checks / 13 failed checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048, TC-050; `034db92` LOT 2 same-term vote-memory erratum corrected, TC-050 green; `7df0af0` DEGRADED evidence semantics, 360 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md` and `LOT3_FDIR_SAFE_REPORT.md`.  
-**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4; SAFE latched within one powered node instance only (cleared by cold restart); PROTO_ERROR reserved, not implemented; no PGA, discretes, watchdog or hardware FDIR.
+**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0; `76f10d9` LOT 2 closure; `af5da87` LOT 3 RED baseline 360 checks / 13 failed checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048, TC-050; `034db92` LOT 2 same-term vote-memory erratum corrected, TC-050 green; `7df0af0` DEGRADED evidence semantics, 360 / 0; `8177e70` LOT 3 closure; `58a1b5d` LOT 4 RED baseline 455 checks / 7 failed checks in exactly TC-052 (2) and TC-053 (5); `ae9e408` election no longer degrades and SAFE term no longer adopted, 455 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md` and `LOT4_MODE_SEMANTICS_REPORT.md`.  
+**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4; SAFE latched within one powered node instance only (cleared by cold restart); PROTO_ERROR reserved, not implemented; no PGA, discretes, watchdog or hardware FDIR; four local states only, ADAPTIVE and PGA not implemented; this bench is not the complete ADD implementation (planned separately as MOSAÏK Advanced).
+
+Previous baseline (LOT 2A through LOT 3): commit `7df0af01d6ae2120bce9a5c6378305e3ef7eeb5c`, 50 test cases, 360 checks, 0 failures.
 
 Previous baseline (LOT 2A through LOT 2D): commit `f4e0f3c1606766ac9b5b3332964e3cdbe5f1e2ea`, 34 test cases, 205 checks, 0 failures.
 
@@ -146,7 +148,9 @@ Previous baseline (LOT 2A + LOT 2B): commit `806646a0a17803e70fff7bc65b6bf45eee4
 |----|-------|-------|-----------------|
 | ADD-F001 | Requirement Namespace Mismatch | TRACEABILITY-GAP | Architecture review |
 | ADD-F002 | Leader Uniqueness Scope | ADD-INTERNAL | Architecture review / LOT 10 |
-| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | LOT 4 |
+| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | LOT 4 closed the four-state local semantics (host); ADAPTIVE and PGA remain open, MOSAÏK Advanced |
+| ADD-F012 | Election Start Conflated with FDIR Degradation | IMPLEMENTATION-GAP | Resolved in LOT 4 (host), commit `ae9e408` |
+| ADD-F013 | SAFE Announcement Term Treated as Consensus Epoch | ADD-INTERNAL, IMPLEMENTATION-GAP | Host interpretation implemented in LOT 4; architecture review |
 | ADD-F004 | CAN-FD Bitrate — Protocol Model vs Physical Validation | IMPLEMENTATION-GAP, VERIFICATION-GAP | LOT 6, 12, 14 |
 | ADD-F005 | Environmental Requirements | VERIFICATION-GAP | LOT 13, 14 |
 | ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | Ongoing |

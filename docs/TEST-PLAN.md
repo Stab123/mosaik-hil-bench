@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.5 — 16 September 2026
+**Issue:** 0.6 — 17 September 2026
 
 ## 1. Two levels of verification
 
@@ -71,14 +71,27 @@ the traces are committed under `results/`.
 | TC-048 | Leader crash + natural collision + delayed SAFE frame during backoff | REQ-SAFE-0004, REQ-004, Lot 3 | pass (RED at `af5da87`) |
 | TC-049 | Deterministic reproducibility of the SAFE/DEGRADED scenario | — | pass |
 | TC-050 | One vote per term across a same-term step-down (LOT 2 erratum) | — (protocol invariant), Lot 3 | pass (RED at `af5da87`, green at `034db92`) |
+| TC-051 | Mode legality guard: state × role pairs and emitted state bytes over representative scenarios | INV-MODE-LEGAL, Lot 4 | pass |
+| TC-052 | Fault-free cold boot: no DEGRADED without peer SAFE evidence (C1) | INV-MODE-NO-MAGIC, Lot 4 | pass (RED at `58a1b5d`) |
+| TC-053 | Higher-term SAFE announcement has no authority effect on the healthy majority (C2) | INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT, REQ-SAFE-0004, Lot 4 | pass (RED at `58a1b5d`) |
+| TC-054 | Heartbeat state metadata is not protocol evidence (INIT/NOMINAL/DEGRADED/SAFE) | INV-MODE-METADATA-NONAUTHORITATIVE, Lot 4 | pass |
+| TC-055 | Out-of-range state byte with valid CRC: decoder rejects, no protocol effect | REQ-FUNC-0007, Lot 4 | pass |
+| TC-056 | Stale old-term heartbeat carrying DEGRADED metadata: rejected, no state change | Lot 2B semantics, Lot 4 | pass |
+| TC-057 | Legitimate leader change while DEGRADED: persistence, legality, authority rules | REQ-SAFE-0004, REQ-FUNC-0004, Lot 4 | pass |
+| TC-058 | Partition / crash / re-election / cold restart legality | INV-MODE-LEGAL, Lot 4 | pass |
+| TC-059 | Lower-term SAFE announcement: evidence only, healthy terms and authority unchanged | REQ-SAFE-0004, Lot 4 | pass |
+| TC-060 | Determinism of the TC-052 and TC-053 scenarios (run A vs run B) | — | pass |
 
-Current total at commit `7df0af0`: 50 tests, 360 checks, 0 failures,
+Current total at commit `ae9e408`: 60 tests, 455 checks, 0 failures,
 sanitizer clean. RED-before-fix evidence is preserved in history:
 TC-031 was added RED at `d38985d` (6 failing checks) and passes since
 `f4e0f3c` (LOT 2D); TC-035–TC-050 were added at `af5da87` with 13 failing
 checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048 and TC-050; TC-050
-passes since `034db92` and the five DEGRADED tests since `7df0af0`. See
-`LOT2D_CRASH_RECOVERY_REPORT.md` and `LOT3_FDIR_SAFE_REPORT.md`.
+passes since `034db92` and the five DEGRADED tests since `7df0af0`;
+TC-051–TC-060 were added at `58a1b5d` with 7 failing checks in exactly
+TC-052 (2) and TC-053 (5), which pass since `ae9e408`. See
+`LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md` and
+`LOT4_MODE_SEMANTICS_REPORT.md`.
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.

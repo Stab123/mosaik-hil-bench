@@ -358,7 +358,10 @@ physical CAN-FD faults (LOT 6, 12, 14); STM32H743 / FreeRTOS validation
 5. A NO_QUORUM SAFE node carries a term above the cluster's; when its SAFE
    frames reach the cluster again, the existing higher-term adoption makes
    the leader step down once before a new election. Safety holds; this is a
-   LOT 2 behaviour observed during characterisation and not changed.
+   LOT 2 behaviour observed during characterisation and not changed in
+   LOT 3. (Changed in LOT 4, commit `ae9e408`: the SAFE announcement term
+   is no longer adopted; see `LOT4_MODE_SEMANTICS_REPORT.md`, finding
+   L4-C2.)
 6. Isolation-to-SAFE durations are host observations, not bounds.
 7. Three nodes, quorum two; a single loss is the only tolerable fault.
 8. No cryptographic anti-replay; stale rejection is semantic (Lot 2B).

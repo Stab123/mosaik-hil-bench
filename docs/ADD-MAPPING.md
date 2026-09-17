@@ -1,7 +1,7 @@
 # MOSAÏK ADD-to-Implementation Mapping
 
 **Document:** MOSAIK-ADD-MAP-001  
-**Issue:** 1.1 — 15 September 2026  
+**Issue:** 1.2 — 17 September 2026  
 **Purpose:** Master implementation map linking ADD requirements to architecture, code, tests, and evidence
 
 ---
@@ -107,14 +107,27 @@
 
 ---
 
-## 7. Evidence Classification Reference
+## 7. LOT 4 Specific Mapping (Mode Semantics, four-state host model)
+
+| ADD Ref | Feature | Implementation | Test | Evidence | Status | Limitation |
+|---------|---------|----------------|------|----------|--------|------------|
+| — (ADD-F012) | Election start does not degrade: a fault-free election leaves the operational state untouched; a healthy candidate may remain INIT | `mosaik_node.c`: `start_election()` no longer writes `state` (commit `ae9e408`) | TC-052 (RED at `58a1b5d`), TC-051, TC-058 | LOT4_MODE_SEMANTICS_REPORT.md §8, §11 | IMPLEMENTED-SIM | Four-state host model only; no ADAPTIVE, no PGA |
+| REQ-SAFE-0004 (ADD-F013) | SAFE announcement is FDIR evidence only: its term is not adopted as a consensus epoch; the valid leader keeps role and authority; no election is caused | `mosaik_node.c`: higher-term adoption in `mosaik_on_rx()` excludes `MOSAIK_MSG_SAFE` (commit `ae9e408`); SAFE handler unchanged | TC-053 (RED at `58a1b5d`), TC-059, TC-057 | LOT4_MODE_SEMANTICS_REPORT.md §9, §11, §12 | IMPLEMENTED-SIM | Tested deterministic scenario: interruption 397 ms → 0 ms; not a general bound; host interpretation pending review |
+| — | State × role legality (INV-MODE-LEGAL): INIT never LEADER, SAFE only FOLLOWER; emitted state byte always 0..3 | unchanged `enter_safe()`, `become_leader()`, encoder | TC-051, TC-057, TC-058 | LOT4_MODE_SEMANTICS_REPORT.md §5, §12 | IMPLEMENTED-SIM | Observed over the executed scenarios only |
+| REQ-FUNC-0007 | Out-of-range state byte (4, 5) with valid CRC rejected by the decoder, no protocol effect | `mosaik_proto.c` decoder range check, `decode_errors` | TC-055 | LOT4_MODE_SEMANTICS_REPORT.md §12 | PARTIAL | Detection only; PROTO_ERROR reserved (LOT 3 D2) |
+| — | Heartbeat state metadata (payload byte 3) is not protocol evidence; stale heartbeats with DEGRADED metadata rejected under Lot 2B rules | unchanged HEARTBEAT handler, `check_heartbeat_stale()` | TC-054, TC-056 | LOT4_MODE_SEMANTICS_REPORT.md §12 | IMPLEMENTED-SIM | Executable state values only |
+| — | Determinism of the two RED scenarios | deterministic core and harness | TC-060 (and TC-049) | LOT4_MODE_SEMANTICS_REPORT.md §14 | IMPLEMENTED-SIM | Host model reproducibility only |
+
+---
+
+## 8. Evidence Classification Reference
 
 | Code | Definition | Current Max Claim |
 |------|------------|-------------------|
 | **CbD** | Compliant-by-Design (architectural enforcement) | LOT 2A: vote-per-term, quorum, lease step-down; LOT 2B: term monotonicity, duplicate rejection |
 | **CbA** | Compliant-by-Analysis (math/static analysis) | None yet |
 | **CbT** | Compliant-by-Test on **physical hardware** | **NONE** — no hardware tests |
-| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A, 2B |
+| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A, 2B, 2C, 2D, 3, 4 |
 | **PARTIAL** | Partially implemented/evidenced | REQ-FUNC-0007 (CRC yes, correlation_id no) |
 | **DESIGN-ONLY** | Documented in architecture, not implemented | Most LOT 3+ requirements |
 | **NOT-STARTED** | No work begun | Many |
@@ -123,7 +136,7 @@
 
 ---
 
-## 8. Mapping Maintenance Rules
+## 9. Mapping Maintenance Rules
 
 1. Every new implementation must add/update a row in this table
 2. Status changes require evidence reference

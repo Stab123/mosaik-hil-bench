@@ -1,7 +1,7 @@
 # MOSAÏK ADD Findings Register
 
 **Document:** MOSAIK-ADD-FIND-001  
-**Issue:** 1.2 — 16 September 2026  
+**Issue:** 1.3 — 17 September 2026  
 **Purpose:** Formal documentation of discrepancies, conflicts, and interpretations found in MOSAIK-ADD-0001
 
 ---
@@ -54,8 +54,8 @@ Each finding contains:
 | **Class** | TRACEABILITY-GAP, IMPLEMENTATION-GAP |
 | **Issue** | Terminology inconsistencies:<br/>- ADD Section 4 modes: INIT, NOMINAL, ADAPTIVE, DEGRADED, SAFE, PGA (6 modes)<br/>- Repository (LOT 2A): INIT, NOMINAL, DEGRADED, SAFE (4 modes) — ADAPTIVE and PGA not implemented<br/>- ADD Section 10 REQ-FUNC-0005 references "DEGRADED mode"<br/>- Repository uses `MOSAIK_STATE_` prefix: INIT, NOMINAL, DEGRADED, SAFE |
 | **Impact** | Mode-dependent requirements (e.g., REQ-FUNC-0005 "mission remains useful in DEGRADED") cannot be fully verified until ADAPTIVE and PGA are implemented. PGA (Pending Ground Arbitration) is the formal exit from SAFE in ADD; repository has no PGA — SAFE is terminal in simulation. |
-| **Proposed Interpretation** | Repository modes are a subset. ADAPTIVE and PGA marked DESIGN-ONLY in `SOFTWARE-ARCHITECTURE.md`. SAFE latch is terminal in simulation (no ground arbitration path). Document as known gap. |
-| **Status** | OPEN |
+| **Proposed Interpretation** | Repository modes are a subset. ADAPTIVE and PGA marked DESIGN-ONLY in `SOFTWARE-ARCHITECTURE.md`. SAFE latch is terminal in simulation (no ground arbitration path). Document as known gap. LOT 4 (commit `ae9e408`) froze and validated the local semantics of the four implemented states and their combination with the three roles in the host demonstrator (`LOT4_MODE_SEMANTICS_REPORT.md`); ADAPTIVE and PGA are dependency-blocked in this bench and deferred to the separate ADD-driven project (MOSAÏK Advanced). |
+| **Status** | OPEN (four-state local semantics closed in LOT 4; ADAPTIVE and PGA not implemented) |
 | **Resolution** | — |
 
 ### ADD-F004: CAN-FD Bitrate — Protocol Model vs Physical Validation
@@ -154,6 +154,30 @@ Each finding contains:
 | **Status** | OPEN (interpretation implemented; normative confirmation pending) |
 | **Resolution** | — |
 
+### ADD-F012: Election Start Conflated with FDIR Degradation
+
+| Field | Detail |
+|-------|--------|
+| **Source** | ADD Section 4 mode table (NOMINAL entry: "INIT complete, leader valid"; DEGRADED entry: reduced redundancy after a fault); ADD Section 10 REQ-SAFE-0004 (DEGRADED when a peer enters SAFE); repository `start_election()` before LOT 4 |
+| **Class** | IMPLEMENTATION-GAP |
+| **Issue** | Before LOT 4 the host demonstrator moved a node from INIT to DEGRADED merely because it started an election. In a fault-free cold boot (TC-052 RED at `58a1b5d`) node 2 became CANDIDATE/DEGRADED at 312 ms of simulated time with an empty SAFE evidence mask, for 2 ms, before winning term 1. No ADD mode entry condition and no received peer SAFE evidence justified DEGRADED. The transition conflated consensus progress with FDIR degradation. |
+| **Impact** | Emitted state metadata and local mode observations were wrong during every boot election; the LOT 3 rule "DEGRADED only from received peer SAFE evidence" was violated by an internal transition. No authority or safety invariant was affected. |
+| **Proposed Interpretation** | Implemented in LOT 4 (commit `ae9e408`): `start_election()` no longer touches the operational state. A healthy candidate may remain INIT; NOMINAL arises only from becoming leader or accepting a heartbeat; DEGRADED only from received peer SAFE evidence (ADD-F011). All other election operations are unchanged. Evidence: TC-052 (RED at `58a1b5d`, green at `ae9e408`), guards TC-051, TC-057, TC-058. This is a host-demonstrator interpretation of the four-state model only; it says nothing about ADAPTIVE or PGA. |
+| **Status** | RESOLVED (host demonstrator, four-state model) |
+| **Resolution** | The artificial transition had no requirement basis; removing it restored the LOT 3 evidence rule without changing election semantics. Regression: TC-001–TC-050 unchanged in outcome at `ae9e408`. |
+
+### ADD-F013: SAFE Announcement Term Treated as Consensus Epoch
+
+| Field | Detail |
+|-------|--------|
+| **Source** | ADD Section 10 REQ-SAFE-0004 and Section 82 REQ-SAF-003 (peer SAFE → DEGRADED); ADD Section 4 SAFE mode ("Ground arbitration (PGA) only" exit); PROTOCOL.md section 7 term-adoption rule; repository `mosaik_on_rx()` before LOT 4 |
+| **Class** | ADD-INTERNAL, IMPLEMENTATION-GAP |
+| **Issue** | The ADD does not state whether the term carried by a SAFE announcement is evidence of a newer leadership epoch. Before LOT 4 the host demonstrator applied its generic higher-term adoption to every accepted frame before type dispatch, SAFE included. A node that latches SAFE through election exhaustion legitimately carries a term above the cluster's (three failed elections). When its genuine periodic SAFE announcement reached the healthy majority (TC-053 RED at `58a1b5d`), both survivors adopted term 4, the valid leader stepped down in the same step, a re-election followed and valid authority was absent for 397 ms of simulated time. The frame was genuine, not forged. |
+| **Impact** | A peer that has left consensus could interrupt the valid leader once per reconnection; REQ-FUNC-0004 style recovery was exercised without any leader fault. Safety invariants held (max one valid authority, no term regression). |
+| **Proposed Interpretation** | Implemented in LOT 4 (commit `ae9e408`) as the host-demonstrator interpretation, to be confirmed by architecture review: the higher-term adoption applies to consensus-bearing message types only (HEARTBEAT, VOTE_REQ, VOTE_GRANT, ACK). A received SAFE frame remains FDIR evidence (`last_safe_rx_ms[]`, `safe_evidence_mask`, DEGRADED semantics of ADD-F011) but its term changes no term, role, vote, leader identity, lease or election timing. The wire format, the sender's term and the received frame are untouched. Evidence: TC-053 (RED at `58a1b5d`, green at `ae9e408`, tested-scenario interruption 397 ms → 0 ms), guards TC-059 (lower-term announcement), TC-057, TC-058. |
+| **Status** | OPEN (interpretation implemented; normative confirmation pending) |
+| **Resolution** | — |
+
 ---
 
 ## 3. Finding Status Summary
@@ -162,7 +186,7 @@ Each finding contains:
 |----|-------|-------|--------|
 | ADD-F001 | Requirement Namespace Mismatch | TRACEABILITY-GAP | OPEN |
 | ADD-F002 | Leader Uniqueness Scope | ADD-INTERNAL | OPEN |
-| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | OPEN |
+| ADD-F003 | System Mode Terminology | TRACEABILITY-GAP, IMPLEMENTATION-GAP | OPEN (four-state local semantics closed in LOT 4; ADAPTIVE and PGA not implemented) |
 | ADD-F004 | CAN-FD Bitrate — Protocol Model vs Physical Validation | IMPLEMENTATION-GAP, VERIFICATION-GAP | OPEN |
 | ADD-F005 | Environmental Requirements | VERIFICATION-GAP | OPEN |
 | ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | OPEN |
@@ -171,6 +195,8 @@ Each finding contains:
 | ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | OPEN |
 | ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | OPEN |
 | ADD-F011 | DEGRADED Exit and Freshness Semantics Not Defined | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN (interpretation implemented in LOT 3) |
+| ADD-F012 | Election Start Conflated with FDIR Degradation | IMPLEMENTATION-GAP | RESOLVED (host demonstrator, LOT 4) |
+| ADD-F013 | SAFE Announcement Term Treated as Consensus Epoch | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN (interpretation implemented in LOT 4) |
 
-**Total:** 11 findings, all OPEN.  
+**Total:** 13 findings; 12 OPEN, 1 RESOLVED (ADD-F012, host demonstrator).  
 **Next review:** LOT 0 closure / architecture review board.

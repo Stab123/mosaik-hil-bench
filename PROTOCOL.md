@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.5 — 16 September 2026
+**Issue:** 0.6 — 17 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -182,7 +182,10 @@ election. During that wait it holds the follower role, keeps its term and
 its vote for the failed term, and grants no second vote in that term. The
 wait is not a failed election. The backoff breaks the lock-step that
 otherwise makes a split vote between two candidates persist; it does not
-prevent the first collision.
+prevent the first collision. Starting an election is consensus activity and
+does not change the operational state (Lot 4): a node that boots INIT may
+remain INIT while candidate; NOMINAL arises only from becoming leader or
+accepting a heartbeat, DEGRADED only from received peer SAFE evidence.
 
 **Acknowledgement (Lot 2C).** A follower that accepts a heartbeat replies
 with an acknowledgement echoing the heartbeat sequence number. The leader
@@ -215,7 +218,10 @@ The function `mosaik_get_last_reject_reason()` reports the rejection cause
 for test instrumentation.
 
 **Single-leader invariant (REQ-002).** A node grants at most one vote per term.
-A node observing any message with a higher term adopts it and steps down. These
+A node observing any consensus-bearing message (heartbeat, vote request,
+vote grant, acknowledgement) with a higher term adopts it and steps down. A
+SAFE announcement is not consensus-bearing: its term is FDIR metadata and is
+never adopted (Lot 4, see the SAFE contract below). These
 two rules together make two leaders in the same term impossible under the
 assumed fault model. Vote memory (`voted_for`, `voted_term`) is never erased
 by a role change within the same term; only a strictly higher term makes a
@@ -240,7 +246,13 @@ for the lifetime of one powered node instance; a cold restart creates a new
 volatile instance and therefore clears it, since persistence is not
 implemented. SAFE is not propagated: a received SAFE frame never moves a
 peer into SAFE. Two SAFE nodes leave the third without quorum, which then
-latches SAFE through election exhaustion.
+latches SAFE through election exhaustion. A received SAFE frame is FDIR
+evidence only (Lot 4): it updates the receiver's per-peer SAFE evidence and
+its DEGRADED state as described below, but its term, even when higher than
+the receiver's, is not adopted and changes no role, term, vote, leader
+identity, lease or election timing. A node that latched SAFE through
+election exhaustion carries a term above the cluster's; its announcements
+therefore no longer step the valid leader down (Lot 4, TC-053).
 
 **Degraded operation (Lot 3).** A node records, per peer, the local time of
 the latest SAFE frame actually received from that peer. That evidence is
@@ -282,5 +294,6 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 | **Lot 2C: directional faults and authority evidence** | **6, 7** | **TC-013 to TC-020** |
 | **Lot 2D: crash, restart, candidate retry backoff** | **7** | **TC-021 to TC-034** |
 | **Lot 3: SAFE contract, DEGRADED evidence, recovery around SAFE, one-vote erratum** | **5, 7** | **TC-035 to TC-050** |
+| **Lot 4: election does not degrade, SAFE term not adopted, state metadata non-authoritative** | **5, 7** | **TC-051 to TC-060** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.

@@ -11,7 +11,7 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 360 checks across 50 test cases, run by
+with `-Wall -Wextra -Werror` and passes 455 checks across 60 test cases, run by
 CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
 leader from retaining authority indefinitely during a 2+1 network partition.
 Lot 2B adds stale/replay message immunity using semantic rejection based on
@@ -22,7 +22,14 @@ randomised candidate retry backoff that stops a split vote from persisting in
 lock-step (see `LOT2D_CRASH_RECOVERY_REPORT.md`). Lot 3 formalises and tests
 the SAFE contract and makes DEGRADED persist on fresh, locally received peer
 SAFE evidence; its adversarial tests also exposed and closed a LOT 2 erratum
-in same-term vote memory (see `LOT3_FDIR_SAFE_REPORT.md`).
+in same-term vote memory (see `LOT3_FDIR_SAFE_REPORT.md`). Lot 4 separates
+consensus from FDIR evidence in the four-state local mode model: starting an
+election no longer degrades a node, and a SAFE announcement's term is no
+longer adopted as a consensus epoch (see `LOT4_MODE_SEMANTICS_REPORT.md`).
+
+This repository is a deterministic experimental protocol and verification
+bench. It is not the complete MOSAÏK ADD implementation; that is planned as a
+separate project, MOSAÏK Advanced.
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -61,6 +68,14 @@ procured. No measured latency is reported anywhere in this repository.
   does not revoke authority; the cluster recovers around a SAFE node —
   verified by TC-035 through TC-050, captured RED at commit `af5da87` before
   the corrections `034db92` and `7df0af0`.**
+- **Mode semantics (Lot 4): a fault-free election does not move a node
+  INIT to DEGRADED (a healthy candidate may remain INIT), and a received
+  SAFE announcement is FDIR evidence only: its term is not adopted, so a
+  latched peer cannot step a valid leader down or force an election (the
+  tested authority interruption went from 397 ms to 0 ms); heartbeat state
+  metadata and out-of-range state bytes have no protocol effect — verified
+  by TC-051 through TC-060, captured RED at commit `58a1b5d` before the
+  correction `ae9e408`.**
 
 ## What it does not demonstrate
 
