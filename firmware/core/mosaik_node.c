@@ -159,9 +159,11 @@ static void start_election(mosaik_node_t *n)
     n->vote_mask  = (uint8_t)(1u << (n->id - 1u));
     n->leader_id  = 0u;
     n->deadline_ms = n->now_ms + n->cfg.vote_timeout_ms;
-    if (n->state == MOSAIK_STATE_INIT) {
-        n->state = MOSAIK_STATE_DEGRADED;
-    }
+    /* Lot 4 (C1): starting an election is consensus activity, not FDIR
+     * degradation. The state is left untouched: a healthy candidate may
+     * remain INIT. DEGRADED arises only from received peer SAFE evidence
+     * (Lot 3); NOMINAL arises only from leadership or an accepted
+     * heartbeat. */
     emit(n, MOSAIK_MSG_VOTE_REQ, 0u);
 }
 
@@ -245,8 +247,13 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         return; /* SAFE is latched; recovery requires ground arbitration */
     }
 
-    /* A higher term always wins: step down and adopt it. */
-    if (msg.term > node->term) {
+    /* A higher term always wins: step down and adopt it.
+     * Lot 4 (C2): only for message types whose term is consensus evidence
+     * of a leadership epoch (HEARTBEAT, VOTE_REQ, VOTE_GRANT, ACK). A SAFE
+     * announcement is FDIR evidence only: its term is not adopted, so a
+     * latched peer can never step a valid leader down or force an
+     * election. The SAFE handler below records the evidence. */
+    if (msg.type != MOSAIK_MSG_SAFE && msg.term > node->term) {
         become_follower(node, msg.term);
     }
 
