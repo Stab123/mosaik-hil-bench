@@ -81,6 +81,16 @@ typedef struct {
     /* LOT 3 OBSERVATION: frames actually emitted per source node and message
      * type, counted in bus_tx(). Read by tests only; never read by any node. */
     uint32_t tx_count[N_NODES][6];
+
+    /* LOT 4 OBSERVATION: raw state and role bytes of every frame actually
+     * emitted by a running node, read in bus_tx() before decoding, and a
+     * copy of the last HEARTBEAT frame each node emitted (for replay tests).
+     * Read by tests only; never read by any node. */
+    uint32_t       tx_state_byte_count[4];
+    uint32_t       tx_state_byte_out_of_range;
+    uint32_t       tx_role_byte_out_of_range;
+    mosaik_frame_t last_hb_frame[N_NODES];
+    bool           last_hb_frame_valid[N_NODES];
 } bus_t;
 
 static bus_t g_bus;
@@ -96,8 +106,21 @@ static void bus_tx(const mosaik_frame_t *frame, void *user)
     /* LOT 3 OBSERVATION only: record what this node actually emitted. */
     if (src_idx >= 0 && src_idx < N_NODES) {
         mosaik_msg_t obs;
+        /* LOT 4 OBSERVATION only: raw emitted state/role bytes. */
+        if (frame->data[3] <= (uint8_t)MOSAIK_STATE_SAFE) {
+            g_bus.tx_state_byte_count[frame->data[3]]++;
+        } else {
+            g_bus.tx_state_byte_out_of_range++;
+        }
+        if (frame->data[2] > (uint8_t)MOSAIK_ROLE_LEADER) {
+            g_bus.tx_role_byte_out_of_range++;
+        }
         if (mosaik_decode(frame, &obs) && (int)obs.type >= 0 && (int)obs.type < 6) {
             g_bus.tx_count[src_idx][(int)obs.type]++;
+            if (obs.type == MOSAIK_MSG_HEARTBEAT) {
+                g_bus.last_hb_frame[src_idx] = *frame;
+                g_bus.last_hb_frame_valid[src_idx] = true;
+            }
         }
     }
     if (g_bus.queued >= QUEUE_LEN) { return; }
@@ -3371,6 +3394,892 @@ static void tc_050_same_term_vote_memory_across_step_down(void)
            TX(li, MOSAIK_MSG_VOTE_GRANT) - g1);
 }
 
+/* ------------------------------------------------------------------
+ * LOT 4: system mode semantics (Phase 1 RED baseline).
+ *
+ * Frozen decisions under test (LOT 4 specification freeze):
+ *   L4-C1  a fault-free election must not move a node INIT -> DEGRADED;
+ *          DEGRADED requires received peer SAFE evidence (LOT 3 model);
+ *          a healthy candidate may remain INIT.
+ *   L4-C2  a received SAFE frame is FDIR evidence only. Its term is not
+ *          evidence of a newer leadership epoch and must not drive the
+ *          generic higher-term adoption.
+ * TC-052 (C1) and TC-053 (C2) are the official RED evidence and are
+ * EXPECTED TO FAIL on 8177e70. TC-051 and TC-054..TC-060 are guards that
+ * must hold on the frozen baseline. Harness rules are those of LOT 3: no
+ * node field is ever written from a test; faults only through directional
+ * network actions, crash/cold restart, frame injection and delayed
+ * delivery; harness knowledge is used for assertions only.
+ * ------------------------------------------------------------------- */
+
+static const char *l4_state_name(unsigned s)
+{
+    static const char *names[4] = {"INIT", "NOMINAL", "DEGRADED", "SAFE"};
+    return s < 4u ? names[s] : "OUT-OF-RANGE";
+}
+
+static const char *l4_role_name(unsigned r)
+{
+    static const char *names[3] = {"FOLLOWER", "CANDIDATE", "LEADER"};
+    return r < 3u ? names[r] : "OUT-OF-RANGE";
+}
+
+/* Executable state x role legality under the frozen four-state model.
+ * INIT: FOLLOWER or CANDIDATE (a healthy candidate may remain INIT).
+ * NOMINAL: any role. DEGRADED: any role (a candidate may hold fresh peer
+ * SAFE evidence; the C1 transient DEGRADED+CANDIDATE is also still legal
+ * on this RED baseline). SAFE: FOLLOWER only.
+ * Illegal: INIT+LEADER, SAFE+CANDIDATE, SAFE+LEADER, any out-of-range value. */
+static bool mode_pair_legal(mosaik_state_t s, mosaik_role_t r)
+{
+    if ((unsigned)s > 3u || (unsigned)r > 2u) { return false; }
+    if (s == MOSAIK_STATE_INIT) { return r != MOSAIK_ROLE_LEADER; }
+    if (s == MOSAIK_STATE_SAFE) { return r == MOSAIK_ROLE_FOLLOWER; }
+    return true;
+}
+
+/* Per-step read-only mode legality observation (INV-MODE-LEGAL). */
+typedef struct {
+    uint32_t pair_steps[4][3];            /* node-steps per (state, role) */
+    uint32_t illegal_steps;
+    int      first_illegal_idx;
+    uint32_t first_illegal_ms;
+    unsigned first_illegal_state, first_illegal_role;
+    uint32_t degraded_no_evidence_steps;  /* DEGRADED with mask == 0: informative only here (C1) */
+    uint32_t degraded_with_evidence_steps;
+} mode_obs_t;
+
+static void mode_init(mode_obs_t *o)
+{
+    memset(o, 0, sizeof(*o));
+    o->first_illegal_idx = -1;
+}
+
+static void mode_step(mode_obs_t *o)
+{
+    int i;
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        unsigned s = (unsigned)n->state, r = (unsigned)n->role;
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (!mode_pair_legal(n->state, n->role)) {
+            if (o->illegal_steps == 0u) {
+                o->first_illegal_idx = i; o->first_illegal_ms = n->now_ms;
+                o->first_illegal_state = s; o->first_illegal_role = r;
+            }
+            o->illegal_steps++;
+        } else {
+            o->pair_steps[s][r]++;
+        }
+        if (n->state == MOSAIK_STATE_DEGRADED) {
+            if (n->safe_evidence_mask == 0u) { o->degraded_no_evidence_steps++; }
+            else                             { o->degraded_with_evidence_steps++; }
+        }
+    }
+}
+
+static void mode_run(mode_obs_t *m, traj_obs_t *t, uint32_t ms)
+{
+    uint32_t k;
+    for (k = 0; k < ms; k++) {
+        bus_step();
+        if (t) { traj_step(t); }
+        mode_step(m);
+    }
+}
+
+/* Accumulate the emitted-byte observation of the current bus into totals. */
+static void l4_accum_tx_bytes(uint32_t *cnt, uint32_t *oor_state, uint32_t *oor_role)
+{
+    int k;
+    for (k = 0; k < 4; k++) { cnt[k] += g_bus.tx_state_byte_count[k]; }
+    *oor_state += g_bus.tx_state_byte_out_of_range;
+    *oor_role  += g_bus.tx_role_byte_out_of_range;
+}
+
+/* Protocol-visible snapshot of one node (read-only). */
+typedef struct {
+    mosaik_role_t  role;
+    mosaik_state_t state;
+    uint16_t       term;
+    uint8_t        voted_for;
+    uint16_t       voted_term;
+    uint8_t        mask;
+    uint8_t        leader_id;
+    bool           auth;
+    uint32_t       decode_errors;
+    uint32_t       stale_term;
+} node_snap_t;
+
+static void snap_node(node_snap_t *s, int i)
+{
+    const mosaik_node_t *n = &g_bus.node[i];
+    s->role = n->role; s->state = n->state; s->term = n->term;
+    s->voted_for = n->voted_for; s->voted_term = n->voted_term;
+    s->mask = n->safe_evidence_mask; s->leader_id = n->leader_id;
+    s->auth = mosaik_has_valid_leadership_authority(n);
+    s->decode_errors = n->decode_errors; s->stale_term = n->stale_term_rejections;
+}
+
+/* Equal in every protocol-relevant field (counters excluded). */
+static bool snap_same(const node_snap_t *a, const node_snap_t *b)
+{
+    return a->role == b->role && a->state == b->state && a->term == b->term &&
+           a->voted_for == b->voted_for && a->voted_term == b->voted_term &&
+           a->mask == b->mask && a->leader_id == b->leader_id && a->auth == b->auth;
+}
+
+/* FNV-1a fold of the per-node executable trajectory of one step. */
+static uint32_t l4_hash_step(uint32_t h)
+{
+    int i;
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        uint32_t v;
+        if (g_bus.crashed[i] || !g_bus.powered[i]) {
+            v = 0xFFFFFFFFu;
+        } else {
+            v = ((uint32_t)n->role << 28) | ((uint32_t)n->state << 24) |
+                ((uint32_t)n->safe_evidence_mask << 16) | ((uint32_t)n->term << 1) |
+                (mosaik_has_valid_leadership_authority(n) ? 1u : 0u);
+        }
+        h ^= v; h *= 16777619u;
+    }
+    return h;
+}
+
+static uint32_t l4_hash_tx(uint32_t h)
+{
+    int i, k;
+    for (i = 0; i < N_NODES; i++) {
+        for (k = 0; k < 6; k++) { h ^= g_bus.tx_count[i][k]; h *= 16777619u; }
+    }
+    return h;
+}
+
+/* TC-051: mode legality guard. Read-only observation of every state x role
+ * pair and of every emitted state/role byte across representative existing
+ * scenarios. DEGRADED+CANDIDATE is legal on this baseline (see above); the
+ * C1 symptom (DEGRADED without evidence) is reported, not asserted, here. */
+static void tc_051_mode_legality_guard(void)
+{
+    mode_obs_t m;
+    uint32_t bytes[4] = {0u, 0u, 0u, 0u}, oor_state = 0u, oor_role = 0u;
+    int li, i, s, r;
+
+    printf("TC-051  mode legality guard: state x role pairs and emitted state bytes over representative scenarios [Lot 4]\n");
+    mode_init(&m);
+
+    /* 1. cold boot / election */
+    bus_init(); mode_run(&m, NULL, 2000u);
+    l4_accum_tx_bytes(bytes, &oor_state, &oor_role);
+
+    /* 2. split-brain -> SAFE, survivors DEGRADED and re-elect */
+    bus_init(); mode_run(&m, NULL, 2000u);
+    li = split_brain_leader();
+    check(li >= 0, "Lot 4", "split-brain scenario latched SAFE");
+    mode_run(&m, NULL, 3000u);
+    l4_accum_tx_bytes(bytes, &oor_state, &oor_role);
+
+    /* 3. election exhaustion of a lone node (TC-005 mechanism) */
+    bus_init(); mode_run(&m, NULL, 2000u);
+    li = leader_index();
+    for (i = 0; i < N_NODES; i++) { if (i != ((li + 1) % N_NODES)) { g_bus.powered[i] = false; } }
+    mode_run(&m, NULL, 3000u);
+    l4_accum_tx_bytes(bytes, &oor_state, &oor_role);
+
+    /* 4. partition of the leader, then heal */
+    bus_init(); mode_run(&m, NULL, 2000u);
+    li = leader_index();
+    if (li >= 0) { bus_set_partition_2plus1((uint8_t)(li + 1)); }
+    mode_run(&m, NULL, 1500u);
+    bus_heal_partition();
+    mode_run(&m, NULL, 1500u);
+    l4_accum_tx_bytes(bytes, &oor_state, &oor_role);
+
+    /* 5. crash of the leader, cold restart, rejoin */
+    bus_init(); mode_run(&m, NULL, 2000u);
+    li = leader_index();
+    if (li >= 0) { bus_crash_node(li); }
+    mode_run(&m, NULL, 1500u);
+    if (li >= 0) { bus_restart_node(li); }
+    mode_run(&m, NULL, 1500u);
+    l4_accum_tx_bytes(bytes, &oor_state, &oor_role);
+
+    check(m.illegal_steps == 0u, "INV-MODE-LEGAL", "no illegal state x role pair observed (INIT+LEADER, SAFE+CANDIDATE, SAFE+LEADER)");
+    check(m.pair_steps[0][0] > 0u && m.pair_steps[1][0] > 0u && m.pair_steps[1][1] > 0u &&
+          m.pair_steps[1][2] > 0u && m.pair_steps[2][0] > 0u && m.pair_steps[2][2] > 0u &&
+          m.pair_steps[3][0] > 0u,
+          "INV-MODE-LEGAL", "the scenarios exercised INIT, NOMINAL (all roles), DEGRADED follower/leader and SAFE follower");
+    check(oor_state == 0u, "INV-MODE-LEGAL", "every emitted state byte is in the executable range 0..3");
+    check(oor_role == 0u, "INV-MODE-LEGAL", "every emitted role byte is in the range 0..2");
+    check(bytes[0] + bytes[1] + bytes[2] + bytes[3] > 0u, "Lot 4", "emitted frames were observed");
+    if (m.illegal_steps != 0u) {
+        printf("        first illegal pair: node %d at %u ms: %s + %s\n", m.first_illegal_idx + 1, m.first_illegal_ms,
+               l4_state_name(m.first_illegal_state), l4_role_name(m.first_illegal_role));
+    }
+    printf("        node-steps per state x role (FOLLOWER/CANDIDATE/LEADER):\n");
+    for (s = 0; s < 4; s++) {
+        printf("          %-8s", l4_state_name((unsigned)s));
+        for (r = 0; r < 3; r++) { printf(" %8u", m.pair_steps[s][r]); }
+        printf("\n");
+    }
+    printf("        emitted state bytes INIT=%u NOMINAL=%u DEGRADED=%u SAFE=%u, out of range %u; role bytes out of range %u\n",
+           bytes[0], bytes[1], bytes[2], bytes[3], oor_state, oor_role);
+    printf("        DEGRADED node-steps without peer SAFE evidence: %u (C1 symptom, asserted by TC-052), with evidence: %u\n",
+           m.degraded_no_evidence_steps, m.degraded_with_evidence_steps);
+}
+
+/* Scenario driver shared by TC-052 and TC-060: fault-free cold boot of three
+ * nodes observed from cold init until the first heartbeat of a stable
+ * cluster. Every field is a read-only observation. */
+typedef struct {
+    bool     violation;                  /* DEGRADED observed with safe_evidence_mask == 0 */
+    int      v_idx;
+    uint32_t v_ms;                       /* node clock at the observation */
+    unsigned v_role, v_state, v_prev_state;
+    uint16_t v_term, v_prev_term;
+    uint8_t  v_mask;
+    uint32_t v_run_len;                  /* length (ms) of that first DEGRADED run */
+    bool     cand_seen;                  /* first candidacy start */
+    int      cand_idx;
+    uint32_t cand_ms;
+    unsigned cand_state;
+    uint8_t  cand_mask;
+    uint32_t first_valid_ms;
+    int      first_valid_idx;
+    uint16_t first_valid_term;
+    uint32_t recovered_ms, stable_hb_ms, steps;
+    uint32_t max_valid, safe_tx, dropped, delayed, crashes;
+    uint8_t  mask_or;
+    uint32_t hash;
+} c1_result_t;
+
+static void run_c1_scenario(c1_result_t *r)
+{
+    mosaik_state_t prev_state[N_NODES];
+    mosaik_role_t  prev_role[N_NODES];
+    uint16_t       prev_term[N_NODES];
+    uint32_t hb_at_recovery = 0u;
+    int i, rec_li = -1;
+    bool run_open = false;
+
+    memset(r, 0, sizeof(*r));
+    r->v_idx = -1; r->cand_idx = -1; r->first_valid_idx = -1;
+    r->hash = 2166136261u;
+    bus_init();
+    for (i = 0; i < N_NODES; i++) {
+        prev_state[i] = g_bus.node[i].state; prev_role[i] = g_bus.node[i].role; prev_term[i] = g_bus.node[i].term;
+    }
+    while (r->steps < 3000u) {
+        uint32_t v;
+        bus_step(); r->steps++;
+        r->hash = l4_hash_step(r->hash);
+        v = (uint32_t)valid_leader_count();
+        if (v > r->max_valid) { r->max_valid = v; }
+        if (v == 1u && r->first_valid_ms == 0u) {
+            r->first_valid_ms = g_bus.now_ms; r->first_valid_idx = valid_leader_index();
+            r->first_valid_term = g_bus.node[r->first_valid_idx].term;
+        }
+        for (i = 0; i < N_NODES; i++) {
+            const mosaik_node_t *n = &g_bus.node[i];
+            if (!r->cand_seen && n->role == MOSAIK_ROLE_CANDIDATE && prev_role[i] != MOSAIK_ROLE_CANDIDATE) {
+                r->cand_seen = true; r->cand_idx = i; r->cand_ms = n->now_ms;
+                r->cand_state = (unsigned)n->state; r->cand_mask = n->safe_evidence_mask;
+            }
+            if (!r->violation && n->state == MOSAIK_STATE_DEGRADED && n->safe_evidence_mask == 0u) {
+                r->violation = true; r->v_idx = i; r->v_ms = n->now_ms;
+                r->v_role = (unsigned)n->role; r->v_state = (unsigned)n->state;
+                r->v_prev_state = (unsigned)prev_state[i];
+                r->v_term = n->term; r->v_prev_term = prev_term[i]; r->v_mask = n->safe_evidence_mask;
+                run_open = true;
+            }
+            if (run_open && i == r->v_idx) {
+                if (n->state == MOSAIK_STATE_DEGRADED) { r->v_run_len++; } else { run_open = false; }
+            }
+            r->mask_or |= n->safe_evidence_mask;
+            prev_state[i] = n->state; prev_role[i] = n->role; prev_term[i] = n->term;
+        }
+        if (r->recovered_ms == 0u) {
+            if (cluster_recovered(&rec_li)) {
+                r->recovered_ms = g_bus.now_ms;
+                hb_at_recovery = TX(rec_li, MOSAIK_MSG_HEARTBEAT);
+            }
+        } else if (TX(rec_li, MOSAIK_MSG_HEARTBEAT) > hb_at_recovery) {
+            r->stable_hb_ms = g_bus.now_ms;   /* first heartbeat of the stable cluster */
+            break;
+        }
+    }
+    for (i = 0; i < N_NODES; i++) { r->safe_tx += TX(i, MOSAIK_MSG_SAFE); r->crashes += g_bus.crash_count[i]; }
+    r->dropped = g_bus.messages_dropped; r->delayed = g_bus.messages_delayed;
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-052: official C1 RED. Fault-free cold boot: no node may enter DEGRADED
+ * without received peer SAFE evidence; a healthy candidate may remain INIT.
+ * EXPECTED RED on 8177e70: start_election() moves INIT -> DEGRADED. */
+static void tc_052_boot_no_degraded_without_evidence(void)
+{
+    c1_result_t r;
+    printf("TC-052  fault-free cold boot: no DEGRADED without peer SAFE evidence (L4-C1) [Lot 4]\n");
+    run_c1_scenario(&r);
+
+    check(r.safe_tx == 0u && r.mask_or == 0u, "Lot 4", "no SAFE frame was transmitted or received during the boot");
+    check(r.dropped == 0u && r.delayed == 0u && r.crashes == 0u, "Lot 4", "no fault was injected (no drop, delay, crash)");
+    check(r.first_valid_ms != 0u && r.first_valid_ms < 1000u && r.max_valid <= 1u && r.recovered_ms != 0u && r.stable_hb_ms != 0u,
+          "REQ-FUNC-0004", "election proceeded normally to one valid leader and a stable cluster");
+    check(!r.violation, "INV-MODE-NO-MAGIC",
+          "no node entered DEGRADED without received peer SAFE evidence (L4-C1)");
+    check(r.cand_seen && r.cand_state == (unsigned)MOSAIK_STATE_INIT, "INV-MODE-NO-MAGIC",
+          "the first healthy candidate remained INIT when it started its election (L4-C1)");
+
+    printf("        first candidacy: node %d at %u ms, state %s, SAFE evidence mask 0x%02X\n",
+           r.cand_idx + 1, r.cand_ms, l4_state_name(r.cand_state), r.cand_mask);
+    if (r.violation) {
+        printf("        C1 evidence: node %d at %u ms: role %s, state %s (previous step %s), term %u (previous %u), SAFE evidence mask 0x%02X; DEGRADED run %u ms\n",
+               r.v_idx + 1, r.v_ms, l4_role_name(r.v_role), l4_state_name(r.v_state), l4_state_name(r.v_prev_state),
+               r.v_term, r.v_prev_term, r.v_mask, r.v_run_len);
+    } else {
+        printf("        no DEGRADED without evidence observed\n");
+    }
+    printf("        first valid leader node %d term %u at %u ms; cluster recovered at %u ms; first stable heartbeat at %u ms; %u steps observed\n",
+           r.first_valid_idx + 1, r.first_valid_term, r.first_valid_ms, r.recovered_ms, r.stable_hb_ms, r.steps);
+}
+
+/* Scenario driver shared by TC-053 and TC-060: a follower is isolated until it
+ * genuinely exhausts its elections and latches SAFE/no-quorum at a higher
+ * term; delivery is then restored and the SAFE node's own periodic SAFE
+ * announcement reaches the surviving majority. Read-only observation. */
+typedef struct {
+    int      li, f, b;
+    uint16_t term0_li, term0_b;
+    bool     safe_reached;
+    uint32_t t_isolate, t_safe;
+    uint16_t term_safe;
+    uint8_t  safe_cause;
+    bool     majority_valid_isolation;
+    uint32_t t_restore;
+    uint32_t t_evidence;
+    uint16_t term_li_at_evidence, term_b_at_evidence;
+    uint32_t t_term_change;
+    uint16_t term_change_to;
+    int      term_change_idx;
+    bool     vote_req_at_term_change;
+    uint32_t t_role_lost;
+    uint32_t gap_ms, t_auth_restored;
+    int      auth_restored_idx;
+    uint16_t term_auth_restored;
+    bool     leader_role_kept, authority_kept;
+    uint32_t survivor_vote_req_delta, f_grant_delta, f_ack_delta, f_safe_delta, f_other_after_safe;
+    uint16_t term_end_li, term_end_b;
+    unsigned state_end_li, state_end_b, state_end_f;
+    uint8_t  mask_end_li, mask_end_b;
+    uint32_t hash, steps;
+} c2_result_t;
+
+static void run_c2_scenario(c2_result_t *r)
+{
+    uint32_t k, vote_req0, g0, a0, s0, o0;
+    memset(r, 0, sizeof(*r));
+    r->li = r->f = r->b = -1; r->auth_restored_idx = -1; r->term_change_idx = -1;
+    r->leader_role_kept = true; r->authority_kept = true; r->majority_valid_isolation = true;
+    r->hash = 2166136261u;
+
+    bus_init();
+    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    r->steps = 2000u;
+    r->li = leader_index();
+    if (r->li < 0 || valid_leader_index() != r->li) { return; }
+    survivors_of(r->li, &r->f, &r->b);
+    r->term0_li = g_bus.node[r->li].term; r->term0_b = g_bus.node[r->b].term;
+
+    /* Isolation of one follower (both directions) until it latches SAFE. */
+    r->t_isolate = g_bus.now_ms;
+    isolate_node(r->f, true);
+    for (k = 0; k < 4000u && !r->safe_reached; k++) {
+        bus_step(); r->steps++; r->hash = l4_hash_step(r->hash);
+        if (valid_leader_index() != r->li) { r->majority_valid_isolation = false; }
+        if (g_bus.node[r->f].state == MOSAIK_STATE_SAFE) {
+            r->safe_reached = true; r->t_safe = g_bus.node[r->f].safe_entry_ms;
+            r->term_safe = g_bus.node[r->f].term; r->safe_cause = g_bus.node[r->f].safe_cause;
+        }
+    }
+    if (!r->safe_reached) { return; }
+
+    vote_req0 = TX(r->li, MOSAIK_MSG_VOTE_REQ) + TX(r->b, MOSAIK_MSG_VOTE_REQ);
+    g0 = TX(r->f, MOSAIK_MSG_VOTE_GRANT); a0 = TX(r->f, MOSAIK_MSG_ACK); s0 = TX(r->f, MOSAIK_MSG_SAFE);
+    o0 = TX(r->f, MOSAIK_MSG_VOTE_REQ) + TX(r->f, MOSAIK_MSG_HEARTBEAT);
+
+    /* Restore delivery; the SAFE node's genuine periodic announcement follows. */
+    r->t_restore = g_bus.now_ms;
+    isolate_node(r->f, false);
+    for (k = 0; k < 2000u; k++) {
+        int s;
+        bool ev;
+        bus_step(); r->steps++; r->hash = l4_hash_step(r->hash);
+        ev = ((g_bus.node[r->li].safe_evidence_mask | g_bus.node[r->b].safe_evidence_mask) & (uint8_t)(1u << r->f)) != 0u;
+        if (r->t_evidence == 0u && ev) {
+            r->t_evidence = g_bus.now_ms;
+            r->term_li_at_evidence = g_bus.node[r->li].term; r->term_b_at_evidence = g_bus.node[r->b].term;
+        }
+        for (s = 0; s < N_NODES; s++) {
+            uint16_t t0 = (s == r->li) ? r->term0_li : r->term0_b;
+            if (s == r->f) { continue; }
+            if (r->t_term_change == 0u && g_bus.node[s].term != t0) {
+                r->t_term_change = g_bus.now_ms; r->term_change_to = g_bus.node[s].term; r->term_change_idx = s;
+                r->vote_req_at_term_change = (TX(r->li, MOSAIK_MSG_VOTE_REQ) + TX(r->b, MOSAIK_MSG_VOTE_REQ)) != vote_req0;
+            }
+        }
+        if (g_bus.node[r->li].role != MOSAIK_ROLE_LEADER) {
+            if (r->t_role_lost == 0u) { r->t_role_lost = g_bus.now_ms; }
+            r->leader_role_kept = false;
+        }
+        if (valid_leader_index() != r->li) { r->authority_kept = false; }
+        if (valid_leader_count() == 0) {
+            r->gap_ms++;
+        } else if (r->gap_ms != 0u && r->t_auth_restored == 0u) {
+            r->t_auth_restored = g_bus.now_ms; r->auth_restored_idx = valid_leader_index();
+            r->term_auth_restored = g_bus.node[r->auth_restored_idx].term;
+        }
+    }
+    r->survivor_vote_req_delta = TX(r->li, MOSAIK_MSG_VOTE_REQ) + TX(r->b, MOSAIK_MSG_VOTE_REQ) - vote_req0;
+    r->f_grant_delta = TX(r->f, MOSAIK_MSG_VOTE_GRANT) - g0;
+    r->f_ack_delta   = TX(r->f, MOSAIK_MSG_ACK) - a0;
+    r->f_safe_delta  = TX(r->f, MOSAIK_MSG_SAFE) - s0;
+    r->f_other_after_safe = TX(r->f, MOSAIK_MSG_VOTE_REQ) + TX(r->f, MOSAIK_MSG_HEARTBEAT) - o0;
+    r->term_end_li = g_bus.node[r->li].term; r->term_end_b = g_bus.node[r->b].term;
+    r->state_end_li = (unsigned)g_bus.node[r->li].state; r->state_end_b = (unsigned)g_bus.node[r->b].state;
+    r->state_end_f = (unsigned)g_bus.node[r->f].state;
+    r->mask_end_li = g_bus.node[r->li].safe_evidence_mask; r->mask_end_b = g_bus.node[r->b].safe_evidence_mask;
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-053: official C2 RED. A genuine higher-term SAFE announcement must be
+ * FDIR evidence only: no role, authority, term or election effect on the
+ * healthy majority. EXPECTED RED on 8177e70: the generic higher-term adoption
+ * in mosaik_on_rx() executes on MOSAIK_MSG_SAFE before SAFE-specific
+ * processing, so the survivors adopt the SAFE node's term and the leader
+ * steps down. The interruption is measured, not prescribed. */
+static void tc_053_safe_announcement_no_authority_effect(void)
+{
+    c2_result_t r;
+    printf("TC-053  higher-term SAFE announcement has no authority effect on the healthy majority (L4-C2) [Lot 4]\n");
+    run_c2_scenario(&r);
+
+    check(r.li >= 0 && r.safe_reached, "Lot 4", "scenario established: healthy majority, one isolated follower latched SAFE");
+    if (r.li < 0 || !r.safe_reached) { return; }
+    check(r.safe_cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM && r.term_safe > r.term0_li, "REQ-SAFE-0003",
+          "isolated follower genuinely exhausted its elections and latched SAFE/no-quorum at a higher term");
+    check(r.majority_valid_isolation, "INV-LEADER-UNIQUE", "the majority kept one valid leader throughout the isolation");
+    check(r.t_evidence != 0u, "REQ-SAFE-0004", "the SAFE node's periodic announcement created peer SAFE evidence on the survivors");
+    check(r.state_end_li == (unsigned)MOSAIK_STATE_DEGRADED && r.state_end_b == (unsigned)MOSAIK_STATE_DEGRADED,
+          "INV-DEGRADED-PERSISTENT", "survivors are DEGRADED while the peer SAFE evidence stays fresh (LOT 3)");
+    check(r.leader_role_kept, "INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT",
+          "valid leader kept the leader role after receiving the SAFE announcement (L4-C2)");
+    check(r.authority_kept, "INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT",
+          "valid leader kept valid authority after receiving the SAFE announcement (L4-C2)");
+    check(r.term_end_li == r.term0_li && r.term_end_b == r.term0_b, "INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT",
+          "healthy survivor terms were not raised by the SAFE announcement (L4-C2)");
+    check(r.survivor_vote_req_delta == 0u, "INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT",
+          "no election was caused by the SAFE announcement (L4-C2)");
+    check(r.state_end_f == (unsigned)MOSAIK_STATE_SAFE, "INV-SAFE-LATCH", "SAFE node remained SAFE");
+    check(r.f_grant_delta == 0u, "REQ-SAFE-0003", "SAFE node sent no VOTE_GRANT after restore");
+    check(r.f_ack_delta == 0u, "REQ-SAFE-0003", "SAFE node sent no ACK after restore");
+    check(r.gap_ms == 0u, "INV-SAFE-ANNOUNCE-NO-AUTHORITY-EFFECT",
+          "authority gap caused by the SAFE announcement is 0 ms (L4-C2)");
+
+    printf("        leader node %d term %u; follower node %d isolated at %u ms, SAFE/no-quorum at %u ms term %u; delivery restored at %u ms\n",
+           r.li + 1, r.term0_li, r.f + 1, r.t_isolate, r.t_safe, r.term_safe, r.t_restore);
+    printf("        first peer SAFE evidence on survivors at %u ms (survivor terms then: node %d=%u, node %d=%u); SAFE frames from node %d after restore %u, other frame types %u\n",
+           r.t_evidence, r.li + 1, r.term_li_at_evidence, r.b + 1, r.term_b_at_evidence, r.f + 1, r.f_safe_delta, r.f_other_after_safe);
+    if (r.t_term_change != 0u) {
+        printf("        first survivor term change at %u ms: node %d -> term %u (SAFE node term %u, same step as the evidence: %s, VOTE_REQ emitted by a survivor in that step: %s)\n",
+               r.t_term_change, r.term_change_idx + 1, r.term_change_to, r.term_safe,
+               (r.t_term_change == r.t_evidence) ? "yes" : "no", r.vote_req_at_term_change ? "yes" : "no");
+    } else {
+        printf("        survivor terms unchanged after the SAFE announcement\n");
+    }
+    printf("        leader role lost at %u ms (0 = kept); authority restored at %u ms by node %d term %u (0 = never lost); observed authority interruption %u ms\n",
+           r.t_role_lost, r.t_auth_restored, r.auth_restored_idx + 1, r.term_auth_restored, r.gap_ms);
+    printf("        survivor VOTE_REQs after restore %u; SAFE node VOTE_GRANT/ACK after restore %u/%u; end states: leader %s, follower %s, SAFE node %s; masks 0x%02X/0x%02X\n",
+           r.survivor_vote_req_delta, r.f_grant_delta, r.f_ack_delta, l4_state_name(r.state_end_li),
+           l4_state_name(r.state_end_b), l4_state_name(r.state_end_f), r.mask_end_li, r.mask_end_b);
+}
+
+/* TC-054: state metadata (payload byte 3) of a legitimate HEARTBEAT is not
+ * protocol evidence: varying it over INIT/NOMINAL/DEGRADED/SAFE changes
+ * nothing but what the heartbeat semantics already do. */
+static void tc_054_state_metadata_non_authority(void)
+{
+    int li, c, d, s;
+    node_snap_t before, after;
+    mosaik_msg_t m;
+    uint32_t ack0;
+
+    printf("TC-054  heartbeat state metadata is not protocol evidence (INIT/NOMINAL/DEGRADED/SAFE) [Lot 4]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 4", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &c, &d);
+    snap_node(&before, c);
+    check(before.role == MOSAIK_ROLE_FOLLOWER && before.state == MOSAIK_STATE_NOMINAL && before.mask == 0u,
+          "Lot 4", "receiver is a NOMINAL follower without SAFE evidence");
+    for (s = 0; s < 4; s++) {
+        /* Legitimate current-term heartbeat from the actual leader, only byte 3 varies. */
+        make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(li + 1), MOSAIK_ROLE_LEADER, (mosaik_state_t)s,
+                 g_bus.node[li].term, (uint8_t)(200 + s));
+        ack0 = TX(c, MOSAIK_MSG_ACK);
+        deliver_to(c, &m);
+        snap_node(&after, c);
+        check(after.role == MOSAIK_ROLE_FOLLOWER && after.term == before.term && after.voted_for == before.voted_for &&
+              after.voted_term == before.voted_term && after.mask == 0u && after.state == MOSAIK_STATE_NOMINAL &&
+              after.leader_id == (uint8_t)(li + 1) && !after.auth && TX(c, MOSAIK_MSG_ACK) == ack0 + 1u,
+              "INV-MODE-METADATA-NONAUTHORITATIVE",
+              "heartbeat metadata changed no role/term/vote/evidence/state; follower maintenance (ACK) unchanged");
+        printf("        metadata %-8s: role %s, state %s, term %u, mask 0x%02X, ACKs +%u\n", l4_state_name((unsigned)s),
+               l4_role_name((unsigned)after.role), l4_state_name((unsigned)after.state), after.term, after.mask,
+               TX(c, MOSAIK_MSG_ACK) - ack0);
+    }
+
+    /* A latched SAFE node: legitimate heartbeats with any metadata never clear SAFE. */
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "Lot 4", "SAFE node existed");
+    if (li < 0) { return; }
+    bus_run(1000u);
+    c = leader_index();
+    check(c >= 0 && c != li, "Lot 4", "survivors elected a new leader");
+    if (c < 0) { return; }
+    snap_node(&before, li);
+    for (s = 0; s < 4; s++) {
+        make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(c + 1), MOSAIK_ROLE_LEADER, (mosaik_state_t)s,
+                 g_bus.node[c].term, (uint8_t)(200 + s));
+        ack0 = TX(li, MOSAIK_MSG_ACK);
+        deliver_to(li, &m);
+        snap_node(&after, li);
+        check(after.state == MOSAIK_STATE_SAFE && after.role == MOSAIK_ROLE_FOLLOWER && after.term == before.term &&
+              TX(li, MOSAIK_MSG_ACK) == ack0 && !after.auth,
+              "INV-SAFE-LATCH", "heartbeat metadata did not clear SAFE, change term or produce an ACK");
+    }
+    printf("        SAFE node %d: state %s after four metadata variants, term %u, ACKs 0\n",
+           li + 1, l4_state_name((unsigned)after.state), after.term);
+}
+
+/* TC-055: an out-of-range state byte (4, 5) with a valid CRC is rejected by
+ * the decoder and has no protocol effect on any receiver. */
+static void tc_055_out_of_range_state_byte(void)
+{
+    int li, c, d, v, i, k;
+    mosaik_msg_t m, tmp;
+    mosaik_frame_t f, ctrl;
+    node_snap_t before[N_NODES], after[N_NODES];
+
+    printf("TC-055  out-of-range state byte with valid CRC: decoder rejects, no protocol effect [Lot 4]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 4", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &c, &d);
+    for (k = 0; k < 4; k++) {
+        uint8_t byte = (k < 2) ? 4u : 5u;
+        uint8_t src;
+        if (k % 2 == 0) {
+            src = (uint8_t)(li + 1);
+            make_msg(&m, MOSAIK_MSG_HEARTBEAT, src, MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL,
+                     g_bus.node[li].term, (uint8_t)(210 + k));
+        } else {
+            src = (uint8_t)(c + 1);
+            make_msg(&m, MOSAIK_MSG_SAFE, src, MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+                     g_bus.node[c].term, (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+        }
+        mosaik_encode(&f, &m);
+        f.data[3] = byte;
+        f.data[7] = mosaik_crc8(f.data, 7u);        /* valid CRC over the altered payload */
+        ctrl = f; ctrl.data[3] = (uint8_t)MOSAIK_STATE_NOMINAL; ctrl.data[7] = mosaik_crc8(ctrl.data, 7u);
+        check(mosaik_decode(&ctrl, &tmp), "Lot 4", "control: the same frame with an in-range state byte decodes (CRC path valid)");
+        check(!mosaik_decode(&f, &tmp), "INV-MODE-LEGAL", "decoder rejects the out-of-range state byte");
+
+        for (i = 0; i < N_NODES; i++) { snap_node(&before[i], i); }
+        bus_inject_frame(&f, src);
+        bus_step();
+        for (i = 0; i < N_NODES; i++) { snap_node(&after[i], i); }
+        v = 1;
+        for (i = 0; i < N_NODES; i++) {
+            if (i == (int)src - 1) { continue; }
+            if (after[i].decode_errors != before[i].decode_errors + 1u) { v = 0; }
+            if (!snap_same(&before[i], &after[i])) { v = 0; }
+        }
+        check(v != 0, "INV-MODE-METADATA-NONAUTHORITATIVE",
+              "each receiver counted one decode error and changed no role/term/vote/evidence/state/authority");
+        printf("        %s frame from node %u, state byte %u: rejected; receivers unchanged, decode_errors +1 each\n",
+               (k % 2 == 0) ? "HEARTBEAT" : "SAFE", src, byte);
+    }
+    check(valid_leader_index() == li, "INV-LEADER-UNIQUE", "the valid leader is unchanged");
+}
+
+/* TC-056: a replayed legitimate old-term heartbeat carrying DEGRADED metadata
+ * is rejected as stale (LOT 2 semantics); metadata cannot bypass the term
+ * check and changes no local state. The frame is a real one captured from
+ * the former leader's transmit path, with only byte 3 altered (CRC redone). */
+static void tc_056_stale_heartbeat_degraded_metadata(void)
+{
+    int li, a, b, l2 = -1, k, v, i;
+    uint16_t term_old;
+    mosaik_frame_t replay[2];
+    mosaik_msg_t m;
+    node_snap_t before[N_NODES], after[N_NODES];
+
+    printf("TC-056  stale old-term heartbeat carrying DEGRADED metadata: rejected, no state change [Lot 4]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0 && g_bus.last_hb_frame_valid[li], "Lot 4", "leader existed and a real heartbeat frame was captured");
+    if (li < 0 || !g_bus.last_hb_frame_valid[li]) { return; }
+    term_old = g_bus.node[li].term;
+    survivors_of(li, &a, &b);
+    replay[0] = g_bus.last_hb_frame[li];             /* unchanged control */
+    replay[1] = g_bus.last_hb_frame[li];
+    replay[1].data[3] = (uint8_t)MOSAIK_STATE_DEGRADED;
+    replay[1].data[7] = mosaik_crc8(replay[1].data, 7u);
+    check(mosaik_decode(&replay[1], &m) && m.type == MOSAIK_MSG_HEARTBEAT && m.term == term_old &&
+          m.state == MOSAIK_STATE_DEGRADED && m.src == (uint8_t)(li + 1),
+          "Lot 4", "replay frame is a well-formed old-term heartbeat with DEGRADED metadata");
+
+    bus_crash_node(li);
+    for (k = 0; k < 1500 && l2 < 0; k++) {
+        bus_step();
+        if (valid_leader_index() >= 0 && valid_leader_index() != li) { l2 = valid_leader_index(); }
+    }
+    check(l2 >= 0 && g_bus.node[l2].term > term_old, "REQ-FUNC-0004", "survivors elected a new leader at a higher term");
+    if (l2 < 0) { return; }
+    bus_run(300u);
+
+    for (k = 0; k < 2; k++) {
+        for (i = 0; i < N_NODES; i++) { snap_node(&before[i], i); }
+        bus_schedule_delayed(&replay[k], (uint8_t)(li + 1), 3u);   /* network model: delayed delivery */
+        bus_run(4u);
+        for (i = 0; i < N_NODES; i++) { snap_node(&after[i], i); }
+        v = 1;
+        for (i = 0; i < N_NODES; i++) {
+            if (i == li) { continue; }
+            if (after[i].stale_term != before[i].stale_term + 1u) { v = 0; }
+            if (!snap_same(&before[i], &after[i])) { v = 0; }
+        }
+        check(v != 0, "INV-NO-STALE-RECOVERY",
+              "each survivor rejected the replay as stale-term and changed no role/term/vote/evidence/state/authority");
+        printf("        replay %s (term %u < cluster term %u): stale-term rejections +1 on each survivor; leader node %d unchanged\n",
+               k == 0 ? "unchanged" : "with DEGRADED metadata", term_old, g_bus.node[l2].term, l2 + 1);
+    }
+    check(valid_leader_index() == l2 && g_bus.node[a].state == MOSAIK_STATE_NOMINAL && g_bus.node[b].state == MOSAIK_STATE_NOMINAL,
+          "INV-MODE-METADATA-NONAUTHORITATIVE", "authority and operational states unchanged by the metadata");
+}
+
+/* TC-057: a legitimate leader change while peer SAFE evidence is fresh.
+ * DEGRADED persists (LOT 3), every state x role pair is legal, authority
+ * rules are unchanged and DEGRADED metadata in the survivors' own frames
+ * never becomes SAFE evidence. */
+static void tc_057_leader_change_while_degraded(void)
+{
+    int li, a, b, l2 = -1, f2, k, i, nl;
+    uint32_t crash_ms, safe0;
+    bool l2_deg_seen = false, masks_ok = true;
+    uint8_t l2_deg_mask = 0u;
+    uint32_t l2_deg_ms = 0u;
+    traj_obs_t t;
+    mode_obs_t m;
+
+    printf("TC-057  legitimate leader change while DEGRADED: persistence, legality, authority rules [Lot 4]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "Lot 4", "SAFE node existed");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    for (k = 0; k < 1500 && l2 < 0; k++) {
+        bus_step();
+        if (valid_leader_index() >= 0) { l2 = valid_leader_index(); }
+    }
+    check(l2 >= 0 && l2 != li && g_bus.node[l2].state == MOSAIK_STATE_DEGRADED &&
+          (g_bus.node[l2].safe_evidence_mask & (uint8_t)(1u << li)) != 0u,
+          "REQ-SAFE-0004", "survivors elected a DEGRADED leader holding received SAFE evidence");
+    if (l2 < 0) { return; }
+    f2 = (l2 == a) ? b : a;
+
+    traj_init(&t); mode_init(&m);
+    crash_ms = g_bus.now_ms; safe0 = TX(li, MOSAIK_MSG_SAFE);
+    bus_crash_node(l2);                                 /* legitimate leader loss */
+    mode_run(&m, &t, 200u);
+    bus_restart_node(l2);                               /* cold restart: INIT, no evidence */
+    check(g_bus.node[l2].state == MOSAIK_STATE_INIT && g_bus.node[l2].safe_evidence_mask == 0u && g_bus.node[l2].term == 0u,
+          "Lot 4", "cold-restarted node is INIT with no SAFE evidence");
+    for (k = 0; k < 2000; k++) {
+        bus_step(); traj_step(&t); mode_step(&m);
+        if (!l2_deg_seen && g_bus.node[l2].state == MOSAIK_STATE_DEGRADED) {
+            l2_deg_seen = true; l2_deg_mask = g_bus.node[l2].safe_evidence_mask; l2_deg_ms = g_bus.node[l2].now_ms;
+        }
+    }
+    nl = valid_leader_index();
+    for (i = 0; i < N_NODES; i++) {
+        if ((g_bus.node[i].safe_evidence_mask & (uint8_t)~(1u << li)) != 0u) { masks_ok = false; }
+    }
+    check(nl >= 0 && nl != li && g_bus.node[nl].became_leader_ms > crash_ms, "REQ-FUNC-0004",
+          "a new valid leader was elected after the leader loss (legitimate leader change)");
+    check(TX(li, MOSAIK_MSG_SAFE) > safe0 + 10u, "Lot 4", "SAFE evidence stayed fresh (SAFE node kept announcing)");
+    check(m.illegal_steps == 0u, "INV-MODE-LEGAL", "no illegal state x role pair during the leader change");
+    check(t.leader_degraded_valid_seen && nl >= 0 && g_bus.node[nl].state == MOSAIK_STATE_DEGRADED,
+          "INV-DEGRADED-PERSISTENT", "the new leader holds valid authority while DEGRADED (LOT 3)");
+    check(t.nominal_after_first_deg[f2] == 0u && g_bus.node[f2].state == MOSAIK_STATE_DEGRADED,
+          "INV-DEGRADED-PERSISTENT", "the surviving follower never returned to NOMINAL while evidence was fresh");
+    check(l2_deg_seen && l2_deg_mask != 0u, "INV-MODE-NO-MAGIC",
+          "the restarted node entered DEGRADED only while holding received SAFE evidence");
+    check(masks_ok, "INV-MODE-METADATA-NONAUTHORITATIVE",
+          "DEGRADED metadata in the survivors' own frames never became SAFE evidence (masks name the SAFE node only)");
+    check(t.safe_auth_violations == 0u && t.safe_role_violations == 0u && t.safe_exits == 0u, "INV-SAFE-NO-AUTHORITY",
+          "SAFE node held no authority, no role and did not exit");
+    check(t.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1");
+    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        SAFE node %d; DEGRADED leader %d crashed at %u ms, cold restart at %u ms; new leader node %d term %u at %u ms (%s)\n",
+           li + 1, l2 + 1, crash_ms, crash_ms + 200u, nl + 1, nl >= 0 ? g_bus.node[nl].term : 0u,
+           nl >= 0 ? g_bus.node[nl].became_leader_ms : 0u, nl >= 0 ? l4_state_name((unsigned)g_bus.node[nl].state) : "-");
+    printf("        restarted node %d first DEGRADED at %u ms with SAFE evidence mask 0x%02X; masks 0x%02X/0x%02X/0x%02X\n",
+           l2 + 1, l2_deg_ms, l2_deg_mask, g_bus.node[0].safe_evidence_mask, g_bus.node[1].safe_evidence_mask,
+           g_bus.node[2].safe_evidence_mask);
+}
+
+/* TC-058: partition, crash, re-election and cold restart under the legality
+ * observer; a cold restart returns to INIT with volatile SAFE evidence
+ * cleared, and re-acquires DEGRADED only from frames actually received. */
+static void tc_058_partition_crash_restart_legality(void)
+{
+    int li, l2 = -1, l3, i, fdeg = -1, k, lo = -1;
+    traj_obs_t t;
+    mode_obs_t m;
+
+    printf("TC-058  partition / crash / re-election / cold restart legality [Lot 4]\n");
+    bus_init(); traj_init(&t); mode_init(&m);
+    mode_run(&m, &t, 2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 4", "leader existed");
+    if (li < 0) { return; }
+
+    /* A. partition isolating the leader for 600 ms (below the SAFE latch
+     *    boundary established by TC-042), then heal */
+    bus_set_partition_2plus1((uint8_t)(li + 1));
+    mode_run(&m, &t, 600u);
+    check(!mosaik_has_valid_leadership_authority(&g_bus.node[li]), "INV-LEADER-UNIQUE", "isolated leader lost authority at lease expiry");
+    bus_heal_partition();
+    mode_run(&m, &t, 1500u);
+    check(cluster_recovered(&lo) && g_bus.node[li].state != MOSAIK_STATE_SAFE, "INV-RECOVERY-VERIFIED", "cluster recovered after the heal without SAFE");
+
+    /* B. crash of the current leader, re-election, cold restart, rejoin */
+    l2 = leader_index();
+    if (l2 < 0) { check(false, "Lot 4", "leader existed before the crash"); return; }
+    bus_crash_node(l2);
+    mode_run(&m, &t, 1500u);
+    check(valid_leader_index() >= 0 && valid_leader_index() != l2, "REQ-FUNC-0004", "survivors re-elected after the crash");
+    bus_restart_node(l2);
+    check(g_bus.node[l2].state == MOSAIK_STATE_INIT && g_bus.node[l2].role == MOSAIK_ROLE_FOLLOWER &&
+          g_bus.node[l2].term == 0u && g_bus.node[l2].safe_evidence_mask == 0u,
+          "Lot 4", "cold restart returns to INIT/FOLLOWER, term 0, no SAFE evidence");
+    mode_run(&m, &t, 1500u);
+    check(cluster_recovered(&lo) && g_bus.node[l2].state == MOSAIK_STATE_NOMINAL, "INV-RECOVERY-VERIFIED",
+          "restarted node rejoined NOMINAL and the cluster recovered");
+
+    /* C. SAFE node present: a DEGRADED follower's cold restart clears its
+     *    volatile evidence, which is re-acquired only from received frames. */
+    l3 = split_brain_leader();
+    check(l3 >= 0, "Lot 4", "SAFE node created");
+    if (l3 < 0) { return; }
+    for (k = 0; k < 1500 && valid_leader_index() < 0; k++) { bus_step(); traj_step(&t); mode_step(&m); }
+    lo = valid_leader_index();
+    check(lo >= 0 && lo != l3, "REQ-FUNC-0004", "survivors elected around the SAFE node");
+    if (lo < 0) { return; }
+    for (i = 0; i < N_NODES; i++) { if (i != lo && i != l3) { fdeg = i; } }
+    check(g_bus.node[fdeg].state == MOSAIK_STATE_DEGRADED && (g_bus.node[fdeg].safe_evidence_mask & (uint8_t)(1u << l3)) != 0u,
+          "REQ-SAFE-0004", "follower is DEGRADED with received SAFE evidence before its crash");
+    bus_crash_node(fdeg);
+    mode_run(&m, &t, 200u);
+    bus_restart_node(fdeg);
+    check(g_bus.node[fdeg].state == MOSAIK_STATE_INIT && g_bus.node[fdeg].safe_evidence_mask == 0u &&
+          g_bus.node[fdeg].term == 0u && g_bus.node[fdeg].role == MOSAIK_ROLE_FOLLOWER,
+          "Lot 4", "volatile SAFE evidence cleared on cold restart (INIT, mask 0, term 0)");
+    mode_run(&m, &t, 1500u);
+    check(g_bus.node[fdeg].state == MOSAIK_STATE_DEGRADED && (g_bus.node[fdeg].safe_evidence_mask & (uint8_t)(1u << l3)) != 0u &&
+          g_bus.node[fdeg].role == MOSAIK_ROLE_FOLLOWER,
+          "INV-MODE-NO-MAGIC", "DEGRADED re-acquired only from SAFE frames actually received after the restart");
+
+    check(m.illegal_steps == 0u, "INV-MODE-LEGAL", "no illegal state x role pair across partition, crash, restart and SAFE");
+    check(t.safe_role_violations == 0u && t.safe_auth_violations == 0u, "INV-SAFE-NO-AUTHORITY", "no SAFE candidate or leader, no SAFE authority");
+    check(t.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1 throughout");
+    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression (cold restarts excluded by construction)");
+    printf("        partition leader %d, crashed leader %d, SAFE node %d, restarted DEGRADED follower %d; valid leader now node %d term %u\n",
+           li + 1, l2 + 1, l3 + 1, fdeg + 1, valid_leader_index() + 1,
+           valid_leader_index() >= 0 ? g_bus.node[valid_leader_index()].term : 0u);
+}
+
+/* TC-059: a genuine SAFE node whose term is LOWER than the surviving
+ * cluster's: its announcements are evidence, nothing else. */
+static void tc_059_lower_term_safe_announcement(void)
+{
+    int li, a, b, l2 = -1, k;
+    uint16_t term_safe, ta, tb;
+    uint32_t safe0, g0, k0, r0, h0, valid_steps = 0u, deg_steps = 0u;
+
+    printf("TC-059  lower-term SAFE announcement: evidence only, healthy terms and authority unchanged [Lot 4]\n");
+    bus_init(); bus_run(2000u);
+    li = split_brain_leader();
+    check(li >= 0, "Lot 4", "SAFE node existed");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    term_safe = g_bus.node[li].term;
+    for (k = 0; k < 1500 && l2 < 0; k++) {
+        bus_step();
+        if (valid_leader_index() >= 0) { l2 = valid_leader_index(); }
+    }
+    check(l2 >= 0 && l2 != li, "REQ-FUNC-0004", "survivors elected a new leader");
+    if (l2 < 0) { return; }
+    bus_run(300u);
+    ta = g_bus.node[a].term; tb = g_bus.node[b].term;
+    check(term_safe < ta && term_safe < tb, "Lot 4", "SAFE node's term is lower than the surviving cluster's term");
+    safe0 = TX(li, MOSAIK_MSG_SAFE); g0 = TX(li, MOSAIK_MSG_VOTE_GRANT); k0 = TX(li, MOSAIK_MSG_ACK);
+    r0 = TX(li, MOSAIK_MSG_VOTE_REQ); h0 = TX(li, MOSAIK_MSG_HEARTBEAT);
+    for (k = 0; k < 1000; k++) {
+        bus_step();
+        if (valid_leader_index() == l2) { valid_steps++; }
+        if (g_bus.node[a].state == MOSAIK_STATE_DEGRADED && g_bus.node[b].state == MOSAIK_STATE_DEGRADED) { deg_steps++; }
+    }
+    check(TX(li, MOSAIK_MSG_SAFE) - safe0 >= 9u, "Lot 4", "the SAFE node's genuine announcements were delivered throughout (>= 9 in 1 s)");
+    check((g_bus.node[a].safe_evidence_mask & (uint8_t)(1u << li)) != 0u && (g_bus.node[b].safe_evidence_mask & (uint8_t)(1u << li)) != 0u,
+          "REQ-SAFE-0004", "SAFE evidence recorded on both survivors");
+    check(deg_steps == 1000u, "INV-DEGRADED-PERSISTENT", "both survivors DEGRADED at every step of the window");
+    check(g_bus.node[a].term == ta && g_bus.node[b].term == tb, "INV-TERM-MONOTONIC", "healthy terms unchanged by the lower-term announcements");
+    check(valid_steps == 1000u, "INV-LEADER-UNIQUE", "the same valid leader held authority at every step");
+    check(g_bus.node[li].state == MOSAIK_STATE_SAFE && g_bus.node[li].role == MOSAIK_ROLE_FOLLOWER && g_bus.node[li].term == term_safe &&
+          TX(li, MOSAIK_MSG_VOTE_GRANT) == g0 && TX(li, MOSAIK_MSG_ACK) == k0 && TX(li, MOSAIK_MSG_VOTE_REQ) == r0 &&
+          TX(li, MOSAIK_MSG_HEARTBEAT) == h0,
+          "REQ-SAFE-0003", "SAFE sender stayed outside consensus (SAFE, follower, own term, SAFE frames only)");
+    printf("        SAFE node %d term %u; cluster term %u, leader node %d; %u SAFE frames in the window; DEGRADED steps %u/1000; valid steps %u/1000\n",
+           li + 1, term_safe, ta, l2 + 1, TX(li, MOSAIK_MSG_SAFE) - safe0, deg_steps, valid_steps);
+}
+
+/* TC-060: determinism guard for the two RED scenarios: run A against run B,
+ * independent of whether the desired post-correction assertions hold. */
+static void tc_060_determinism_of_red_scenarios(void)
+{
+    c1_result_t a1, b1;
+    c2_result_t a2, b2;
+    printf("TC-060  determinism of the TC-052 and TC-053 scenarios (run A vs run B) [Lot 4]\n");
+    run_c1_scenario(&a1); run_c1_scenario(&b1);
+    run_c2_scenario(&a2); run_c2_scenario(&b2);
+    check(a1.hash == b1.hash && memcmp(&a1, &b1, sizeof(a1)) == 0, "Lot 4",
+          "TC-052 scenario: identical per-step roles, states, terms, authority, evidence masks, transmissions and event times");
+    check(a2.hash == b2.hash && memcmp(&a2, &b2, sizeof(a2)) == 0, "Lot 4",
+          "TC-053 scenario: identical per-step roles, states, terms, authority, evidence masks, transmissions and event times");
+    printf("        TC-052 trajectory hash 0x%08X (first DEGRADED-without-evidence at %u ms, stable heartbeat at %u ms) reproduced: %s\n",
+           a1.hash, a1.v_ms, a1.stable_hb_ms, (a1.hash == b1.hash) ? "yes" : "no");
+    printf("        TC-053 trajectory hash 0x%08X (evidence at %u ms, authority interruption %u ms) reproduced: %s\n",
+           a2.hash, a2.t_evidence, a2.gap_ms, (a2.hash == b2.hash) ? "yes" : "no");
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -3431,6 +4340,18 @@ int main(void)
     tc_048_adversarial_crash_collision_safe_frame();
     tc_049_reproducibility();
     tc_050_same_term_vote_memory_across_step_down();
+
+    /* LOT 4: system mode semantics (Phase 1 RED baseline: TC-052, TC-053 expected RED) */
+    tc_051_mode_legality_guard();
+    tc_052_boot_no_degraded_without_evidence();
+    tc_053_safe_announcement_no_authority_effect();
+    tc_054_state_metadata_non_authority();
+    tc_055_out_of_range_state_byte();
+    tc_056_stale_heartbeat_degraded_metadata();
+    tc_057_leader_change_while_degraded();
+    tc_058_partition_crash_restart_legality();
+    tc_059_lower_term_safe_announcement();
+    tc_060_determinism_of_red_scenarios();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
