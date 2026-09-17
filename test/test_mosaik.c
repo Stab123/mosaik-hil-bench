@@ -4280,6 +4280,735 @@ static void tc_060_determinism_of_red_scenarios(void)
            a2.hash, a2.t_evidence, a2.gap_ms, (a2.hash == b2.hash) ? "yes" : "no");
 }
 
+/* ------------------------------------------------------------------
+ * LOT 5: autonomous reconfiguration (Phase 1 RED baseline).
+ *
+ * LOT 5 asks whether a safe membership / quorum reconfiguration can be
+ * introduced without breaking the LOT 2 to LOT 4 invariants. Phase 1 only
+ * characterises the frozen baseline: membership is the configuration
+ * parameter cluster_size copied once by mosaik_init(); quorum is
+ * cluster_size / 2 + 1 and is evaluated only when a VOTE_GRANT is
+ * received; no frame carries membership or a configuration identity; no
+ * node remembers a removed peer. TC-061 to TC-063 and TC-069, TC-070 are
+ * characterisation or guard tests expected to pass. TC-064 to TC-068
+ * express externally observable LOT 5 properties and are EXPECTED TO FAIL
+ * on 7d35cc8 because the capability is absent, not because of any test
+ * placeholder.
+ *
+ * Rules: no node field is written from a test. Faults use the network
+ * model, crash and cold restart, frame injection and delayed delivery. The
+ * only membership input the product offers is the configuration passed to
+ * mosaik_init(); two tests deliberately cold-restart one node with a
+ * different deployed configuration through that public interface (an
+ * out-of-band operator action) to measure whether the protocol can detect
+ * or contain an inconsistent configuration. That is observation of the
+ * product's response, not a protocol operation, and it is labelled as such
+ * in each test. Harness knowledge is used for assertions only.
+ * ------------------------------------------------------------------- */
+
+/* Cold restart with an explicitly deployed configuration: identical to
+ * bus_restart_node() except for the configuration handed to mosaik_init().
+ * Models an operator reflashing one node's configuration. Nothing is
+ * written to the node besides what mosaik_init() itself initialises. */
+static void bus_restart_node_with_cfg(int node_idx, const mosaik_config_t *cfg)
+{
+    if (node_idx < 0 || node_idx >= N_NODES) { return; }
+    if (!g_bus.crashed[node_idx]) { return; }
+    g_bus.crashed[node_idx] = false;
+    g_bus.restart_count[node_idx]++;
+    mosaik_init(&g_bus.node[node_idx], (uint8_t)(node_idx + 1), cfg,
+                bus_tx, (void *)(uintptr_t)(node_idx + 1), g_bus.now_ms);
+}
+
+static uint8_t l5_popcount(uint8_t v)
+{
+    uint8_t c = 0u;
+    while (v) { c = (uint8_t)(c + (v & 1u)); v = (uint8_t)(v >> 1); }
+    return c;
+}
+
+/* The set of sources whose grants and acknowledgements this node would
+ * count, derived read-only from what the node can accept: the decoder
+ * admits sources 1..MOSAIK_MAX_NODES and the handlers filter nothing by
+ * membership, so the set is 1..min(cluster_size, MOSAIK_MAX_NODES). */
+static uint8_t observed_voters(int idx)
+{
+    unsigned n = g_bus.node[idx].cfg.cluster_size, i;
+    uint8_t m = 0u;
+    if (n > MOSAIK_MAX_NODES) { n = MOSAIK_MAX_NODES; }
+    for (i = 0u; i < n; i++) { m |= (uint8_t)(1u << i); }
+    return m;
+}
+
+/* Exhaustive probe of the 11-bit identifier space: how many identifiers
+ * decode at all, per message type, with a well-formed payload. */
+static void l5_probe_identifier_space(uint32_t per_type[6], uint32_t *decodable, uint32_t *beyond_known)
+{
+    uint32_t id;
+    int k;
+    for (k = 0; k < 6; k++) { per_type[k] = 0u; }
+    *decodable = 0u; *beyond_known = 0u;
+    for (id = 0u; id < 0x800u; id++) {
+        uint8_t src;
+        bool any = false;
+        for (src = 1u; src <= 3u && !any; src++) {
+            mosaik_frame_t f; mosaik_msg_t m;
+            f.id = id; f.dlc = MOSAIK_DLC;
+            f.data[0] = MOSAIK_PROTO_VERSION; f.data[1] = src; f.data[2] = 0u; f.data[3] = 1u;
+            f.data[4] = 1u; f.data[5] = 0u; f.data[6] = 0u;
+            f.data[7] = mosaik_crc8(f.data, 7u);
+            if (mosaik_decode(&f, &m)) {
+                any = true;
+                if ((int)m.type >= 0 && (int)m.type < 6) { per_type[(int)m.type]++; }
+                if ((int)m.type > (int)MOSAIK_MSG_ACK || (int)m.type < 1) { (*beyond_known)++; }
+            }
+        }
+        if (any) { (*decodable)++; }
+    }
+}
+
+/* Read-only membership / quorum observer. */
+typedef struct {
+    uint32_t leader_acq[N_NODES];       /* leadership acquisitions */
+    uint8_t  min_grants[N_NODES];       /* smallest counted vote set at acquisition */
+    uint32_t cs_changes;                /* cluster_size changes without a cold restart */
+    uint8_t  cs_min, cs_max;            /* cluster_size values seen on running nodes */
+    mosaik_role_t last_role[N_NODES];
+    uint8_t  last_cs[N_NODES];
+    uint32_t last_restart[N_NODES];
+} l5_obs_t;
+
+static void l5_init(l5_obs_t *o)
+{
+    int i;
+    memset(o, 0, sizeof(*o));
+    o->cs_min = 0xFFu; o->cs_max = 0u;
+    for (i = 0; i < N_NODES; i++) {
+        o->min_grants[i] = 0xFFu;
+        o->last_role[i] = g_bus.node[i].role;
+        o->last_cs[i] = g_bus.node[i].cfg.cluster_size;
+        o->last_restart[i] = g_bus.restart_count[i];
+    }
+}
+
+static void l5_step(l5_obs_t *o)
+{
+    int i;
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (g_bus.restart_count[i] != o->last_restart[i]) {
+            o->last_restart[i] = g_bus.restart_count[i];
+            o->last_cs[i] = n->cfg.cluster_size;
+            o->last_role[i] = n->role;
+        }
+        if (n->cfg.cluster_size != o->last_cs[i]) { o->cs_changes++; o->last_cs[i] = n->cfg.cluster_size; }
+        if (n->cfg.cluster_size < o->cs_min) { o->cs_min = n->cfg.cluster_size; }
+        if (n->cfg.cluster_size > o->cs_max) { o->cs_max = n->cfg.cluster_size; }
+        if (n->role == MOSAIK_ROLE_LEADER && o->last_role[i] != MOSAIK_ROLE_LEADER) {
+            uint8_t g = l5_popcount(n->vote_mask);
+            o->leader_acq[i]++;
+            if (g < o->min_grants[i]) { o->min_grants[i] = g; }
+        }
+        o->last_role[i] = n->role;
+    }
+}
+
+static void l5_run(l5_obs_t *l, traj_obs_t *t, uint32_t ms)
+{
+    uint32_t k;
+    for (k = 0; k < ms; k++) { bus_step(); if (t) { traj_step(t); } l5_step(l); }
+}
+
+static uint8_t l5_min_grants_any(const l5_obs_t *o)
+{
+    int i; uint8_t m = 0xFFu;
+    for (i = 0; i < N_NODES; i++) { if (o->min_grants[i] < m) { m = o->min_grants[i]; } }
+    return m;
+}
+
+/* TC-061: the three-node membership is fixed. Characterisation, expected
+ * PASS: five message types on fifteen identifiers, every payload byte
+ * consumed by an existing field, cluster_size never changes at run time,
+ * every leadership acquisition counted at least two votes, and a node
+ * configured out of band with cluster_size 1 still cannot appoint itself
+ * (quorum is evaluated only when a peer grant is received). */
+static void tc_061_membership_fixed(void)
+{
+    uint32_t per_type[6], decodable, beyond;
+    mosaik_msg_t m, d;
+    mosaik_frame_t base, f;
+    int b, li, k, consumed = 0;
+    l5_obs_t l; traj_obs_t t;
+    mosaik_config_t cfg1;
+
+    printf("TC-061  membership is fixed: five frame types, no spare payload byte, cluster_size and quorum constant [Lot 5]\n");
+    l5_probe_identifier_space(per_type, &decodable, &beyond);
+    check(decodable == 15u && beyond == 0u && per_type[1] == 3u && per_type[2] == 3u && per_type[3] == 3u &&
+          per_type[4] == 3u && per_type[5] == 3u,
+          "Lot 5", "identifier space: exactly 15 decodable identifiers, three per existing type, none beyond ACK");
+
+    /* Every payload byte 0..6 is consumed: altering it changes a decoded field or is rejected. */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, 2u, MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, 0x0102u, 7u);
+    mosaik_encode(&base, &m);
+    for (b = 0; b < 7; b++) {
+        f = base;
+        f.data[b] = (uint8_t)(f.data[b] ^ 0x01u);
+        f.data[7] = mosaik_crc8(f.data, 7u);
+        if (!mosaik_decode(&f, &d)) { consumed++; continue; }
+        if (d.version != m.version || d.src != m.src || d.role != m.role || d.state != m.state ||
+            d.term != m.term || d.arg != m.arg) { consumed++; }
+    }
+    check(consumed == 7, "Lot 5", "no spare payload byte: each of bytes 0..6 is version, src, role, state, term or arg");
+
+    /* cluster_size and quorum under boot, follower isolation, leader crash and cold restart, split-brain. */
+    bus_init(); l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 2000u);
+    li = leader_index();
+    if (li >= 0) { isolate_node((li + 1) % N_NODES, true); }
+    l5_run(&l, &t, 3000u);
+    if (li >= 0) { isolate_node((li + 1) % N_NODES, false); }
+    l5_run(&l, &t, 1000u);
+    li = leader_index();
+    if (li >= 0) { bus_crash_node(li); }
+    l5_run(&l, &t, 1500u);
+    if (li >= 0) { bus_restart_node(li); }
+    l5_run(&l, &t, 1500u);
+    (void)split_brain_leader();
+    l5_run(&l, &t, 2000u);
+    check(l.cs_changes == 0u && l.cs_min == 3u && l.cs_max == 3u, "INV-RECONFIG-QUORUM",
+          "cluster_size stayed 3 on every running node through isolation, crash, cold restart and SAFE");
+    check(l5_min_grants_any(&l) >= 2u, "INV-RECONFIG-QUORUM", "every leadership acquisition counted at least 2 votes (quorum of 3)");
+    check(t.max_valid <= 1u && t.term_regressions == 0u, "INV-LEADER-UNIQUE", "at most one valid authority, no term regression");
+    printf("        decodable identifiers %u (SAFE %u, VOTE_REQ %u, VOTE_GRANT %u, HEARTBEAT %u, ACK %u); payload bytes consumed 7/7; leadership acquisitions n1=%u n2=%u n3=%u, min counted votes %u\n",
+           decodable, per_type[1], per_type[2], per_type[3], per_type[4], per_type[5],
+           l.leader_acq[0], l.leader_acq[1], l.leader_acq[2], l5_min_grants_any(&l));
+
+    /* Out-of-band configuration through the public init interface: a node
+     * cold-restarted with cluster_size 1 (quorum 1) while isolated. */
+    mosaik_config_default(&cfg1); cfg1.cluster_size = 1u;
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    k = (li + 1) % N_NODES;
+    bus_crash_node(k); bus_run(100u);
+    isolate_node(k, true);
+    bus_restart_node_with_cfg(k, &cfg1);
+    l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 3000u);
+    check(l.leader_acq[k] == 0u && g_bus.node[k].state == MOSAIK_STATE_SAFE && t.max_valid <= 1u,
+          "INV-RECONFIG-PARTITION", "an isolated node configured with cluster_size 1 never appointed itself and latched SAFE/no-quorum");
+    printf("        isolated node %d with cluster_size 1: leader acquisitions %u, state %s after 3000 ms (quorum is checked only on a received grant)\n",
+           k + 1, l.leader_acq[k], l4_state_name((unsigned)g_bus.node[k].state));
+}
+
+/* TC-062: peer loss must not imply membership removal. Guard, expected
+ * PASS: one follower unreachable for far longer than every timer; the
+ * survivors keep quorum 2 of the same 3, cluster_size never shrinks, the
+ * unreachable node never holds authority; its LOT 3 SAFE latch is the
+ * model's FDIR response, not a membership change. */
+static void tc_062_peer_loss_is_not_removal(void)
+{
+    int li, f, b;
+    l5_obs_t l; traj_obs_t t;
+    printf("TC-062  peer loss is not membership removal: quorum stays 2 of 3 through a 3000 ms follower isolation [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &f, &b);
+    isolate_node(f, true);
+    l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 3000u);
+    check(l.cs_changes == 0u && l.cs_min == 3u && l.cs_max == 3u, "INV-RECONFIG-NO-MAGIC",
+          "no node changed its cluster_size because a peer became unreachable");
+    check(observed_voters(li) == 0x07u && observed_voters(b) == 0x07u, "INV-RECONFIG-QUORUM",
+          "survivors still count the same three sources; nothing shrank the voter set");
+    check(l.leader_acq[f] == 0u && t.safe_auth_violations == 0u, "INV-RECONFIG-AUTHORITY",
+          "the unreachable node never acquired leadership or authority");
+    check(valid_leader_index() == li, "INV-LEADER-UNIQUE", "the majority leader kept valid authority throughout");
+    check(t.max_valid <= 1u && t.term_regressions == 0u, "INV-LEADER-UNIQUE", "at most one valid authority, no term regression");
+    isolate_node(f, false);
+    l5_run(&l, &t, 1000u);
+    check(l.cs_changes == 0u && valid_leader_index() == li, "INV-RECONFIG-LOT4",
+          "after restore the isolated node's SAFE announcements changed no membership and no authority");
+    printf("        isolated node %d: state %s term %u; leader node %d term %u kept authority; cluster_size %u/%u/%u\n",
+           f + 1, l4_state_name((unsigned)g_bus.node[f].state), g_bus.node[f].term, li + 1, g_bus.node[li].term,
+           g_bus.node[0].cfg.cluster_size, g_bus.node[1].cfg.cluster_size, g_bus.node[2].cfg.cluster_size);
+}
+
+/* TC-063: a minority partition cannot self-reconfigure. Guard, expected
+ * PASS: the isolated node of a 2+1 partition exhausts its recovery paths
+ * and never obtains authority as a one-node membership. */
+static void tc_063_minority_cannot_self_reconfigure(void)
+{
+    int li, iso;
+    l5_obs_t l; traj_obs_t t;
+    printf("TC-063  minority partition cannot self-reconfigure: isolated node never becomes a one-node quorum [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    iso = (li + 2) % N_NODES;
+    bus_set_partition_2plus1((uint8_t)(iso + 1));
+    l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 5000u);
+    check(l.leader_acq[iso] == 0u && t.max_failed[iso] == g_bus.node[iso].cfg.max_failed_elections &&
+          g_bus.node[iso].state == MOSAIK_STATE_SAFE,
+          "INV-RECONFIG-PARTITION", "isolated node exhausted its elections without ever appointing itself and latched SAFE");
+    check(g_bus.node[iso].cfg.cluster_size == 3u && observed_voters(iso) == 0x07u, "INV-RECONFIG-QUORUM",
+          "isolated node still counts itself as one of three, not as a membership of one");
+    check(t.max_valid <= 1u && valid_leader_index() >= 0 && valid_leader_index() != iso, "INV-LEADER-UNIQUE",
+          "authority remained on the majority side only");
+    bus_heal_partition();
+    l5_run(&l, &t, 2000u);
+    check(g_bus.node[iso].state == MOSAIK_STATE_SAFE && l.leader_acq[iso] == 0u && t.safe_auth_violations == 0u,
+          "INV-RECONFIG-LOT3", "after the heal the minority node stayed SAFE without authority");
+    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    printf("        minority node %d: %u failed elections, state %s term %u; majority leader node %d term %u\n",
+           iso + 1, t.max_failed[iso], l4_state_name((unsigned)g_bus.node[iso].state), g_bus.node[iso].term,
+           valid_leader_index() + 1, valid_leader_index() >= 0 ? g_bus.node[valid_leader_index()].term : 0u);
+}
+
+/* TC-064: a legitimate membership change is unavailable. EXPECTED RED on
+ * 7d35cc8. The operational removal of node 3 (it is out of service for
+ * 5000 ms, far beyond every timer) is the intent of the LOT 5 transition
+ * {1,2,3} -> {1,2}. The test asks the protocol, through its wire model and
+ * the survivors' observable voter set, whether that transition can be
+ * proposed, agreed and committed. It cannot: no identifier exists for a
+ * membership transaction and the survivors keep counting three sources. */
+static void tc_064_membership_change_unavailable(void)
+{
+    uint32_t per_type[6], decodable, beyond, k;
+    int li, r, s, i;
+    l5_obs_t l; traj_obs_t t;
+    uint32_t tx_before[N_NODES][6];
+
+    printf("TC-064  legitimate membership change {1,2,3} -> {1,2} is unavailable through the protocol [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    r = (li + 2) % N_NODES;           /* the node to be removed */
+    s = (li + 1) % N_NODES;           /* the other survivor */
+    memcpy(tx_before, g_bus.tx_count, sizeof(tx_before));
+    bus_crash_node(r);
+    l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 5000u);
+    /* Survivors stayed healthy: the transition intent is realistic. */
+    check(valid_leader_index() == li && t.max_valid <= 1u && t.term_regressions == 0u, "INV-RECONFIG-LOT2",
+          "survivors kept one valid leader while the removed node was out of service");
+    /* Every frame the survivors emitted belongs to the five existing types. */
+    for (i = 0, k = 0u; i < N_NODES; i++) { k += g_bus.tx_count[i][0]; }
+    check(k == 0u, "Lot 5", "no frame of an unknown type was emitted");
+    l5_probe_identifier_space(per_type, &decodable, &beyond);
+    /* RED: proposal capability. */
+    check(beyond > 0u, "INV-RECONFIG-NO-MAGIC",
+          "the wire protocol provides an identifier for a membership-change transaction beyond the five existing types");
+    /* RED: agreement/commit capability, observed through the survivors' voter set. */
+    check(observed_voters(li) == (uint8_t)(0x07u & ~(1u << r)) && observed_voters(s) == (uint8_t)(0x07u & ~(1u << r)),
+          "INV-RECONFIG-CONSISTENT",
+          "after 5000 ms without the removed node the survivors' observable voter set excludes it: the removal was proposed, agreed and committed");
+    printf("        removed node %d out of service 5000 ms; survivors' voter sets 0x%02X/0x%02X, cluster_size %u/%u; decodable identifiers %u, beyond known types %u; survivor frames: SAFE %u VOTE_REQ %u VOTE_GRANT %u HEARTBEAT %u ACK %u\n",
+           r + 1, observed_voters(li), observed_voters(s), g_bus.node[li].cfg.cluster_size, g_bus.node[s].cfg.cluster_size,
+           decodable, beyond,
+           g_bus.tx_count[li][1] + g_bus.tx_count[s][1] - tx_before[li][1] - tx_before[s][1],
+           g_bus.tx_count[li][2] + g_bus.tx_count[s][2] - tx_before[li][2] - tx_before[s][2],
+           g_bus.tx_count[li][3] + g_bus.tx_count[s][3] - tx_before[li][3] - tx_before[s][3],
+           g_bus.tx_count[li][4] + g_bus.tx_count[s][4] - tx_before[li][4] - tx_before[s][4],
+           g_bus.tx_count[li][5] + g_bus.tx_count[s][5] - tx_before[li][5] - tx_before[s][5]);
+}
+
+/* Scenario driver shared by TC-065 and TC-070: one follower is cold
+ * restarted with an out-of-band deployed configuration (cluster_size cs)
+ * through the public init interface while connected; peers are observed
+ * for any detection; then the leader is lost and the election that follows
+ * is observed. */
+typedef struct {
+    int      li, f, b;
+    uint8_t  cs;
+    uint32_t rej_before, rej_after;      /* survivors' rejection counters (all kinds) */
+    bool     ack_recorded;               /* leader recorded node f's ACK as current-term evidence */
+    uint32_t f_grants;                   /* grants emitted by node f after the leader loss */
+    int      new_leader;
+    uint8_t  new_leader_mask;
+    uint8_t  new_leader_cs;
+    bool     mixed_config_authority;     /* new leader counted a grant from a node with another cluster_size */
+    uint32_t max_valid, term_regressions;
+    unsigned state_end[N_NODES];
+    uint8_t  cs_end[N_NODES];
+    uint32_t hash;
+} l5_cfg_result_t;
+
+static uint32_t l5_rejections(int i)
+{
+    const mosaik_node_t *n = &g_bus.node[i];
+    return n->stale_term_rejections + n->stale_lease_rejections + n->duplicate_seq_rejections +
+           n->stale_authority_rejections + n->invalid_sender_rejections + n->decode_errors;
+}
+
+static void run_l5_config_scenario(uint8_t cs, l5_cfg_result_t *r)
+{
+    mosaik_config_t cfg;
+    traj_obs_t t;
+    uint32_t k, g0;
+    int i;
+    memset(r, 0, sizeof(*r));
+    r->li = r->f = r->b = r->new_leader = -1; r->cs = cs;
+    r->hash = 2166136261u;
+    mosaik_config_default(&cfg); cfg.cluster_size = cs;
+    bus_init();
+    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    r->li = leader_index();
+    if (r->li < 0) { return; }
+    survivors_of(r->li, &r->f, &r->b);
+    bus_crash_node(r->f);
+    for (k = 0; k < 100u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    bus_restart_node_with_cfg(r->f, &cfg);           /* out-of-band configuration, cold start */
+    r->rej_before = l5_rejections(r->li) + l5_rejections(r->b);
+    traj_init(&t);
+    for (k = 0; k < 1000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
+    r->rej_after = l5_rejections(r->li) + l5_rejections(r->b);
+    r->ack_recorded = (g_bus.node[r->li].role == MOSAIK_ROLE_LEADER) &&
+                      (g_bus.node[r->li].last_ack_term[r->f] == g_bus.node[r->li].term);
+    g0 = TX(r->f, MOSAIK_MSG_VOTE_GRANT);
+    bus_crash_node(r->li);                            /* leader loss: the two remaining nodes must elect */
+    for (k = 0; k < 3000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
+    r->f_grants = TX(r->f, MOSAIK_MSG_VOTE_GRANT) - g0;
+    r->new_leader = valid_leader_index();
+    if (r->new_leader >= 0) {
+        r->new_leader_mask = g_bus.node[r->new_leader].vote_mask;
+        r->new_leader_cs = g_bus.node[r->new_leader].cfg.cluster_size;
+        for (i = 0; i < N_NODES; i++) {
+            if (i != r->new_leader && (r->new_leader_mask & (uint8_t)(1u << i)) != 0u &&
+                g_bus.node[i].cfg.cluster_size != r->new_leader_cs) { r->mixed_config_authority = true; }
+        }
+    }
+    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
+    for (i = 0; i < N_NODES; i++) { r->state_end[i] = (unsigned)g_bus.node[i].state; r->cs_end[i] = g_bus.node[i].cfg.cluster_size; }
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-065: removal must be consistent before quorum changes. EXPECTED RED on
+ * 7d35cc8. A membership change is safe only when every authority-capable
+ * participant applies the same committed configuration. The baseline has no
+ * committed configuration and carries none on the wire, so (A) a participant
+ * whose deployed configuration differs (cluster_size 1, the section-6
+ * example of a node redefining itself as {3}) is neither detected nor
+ * excluded: its ACK counts as lease evidence and its grant decides the next
+ * election; (B) a participant whose configuration requires a larger quorum
+ * (cluster_size 5) is likewise undetected and, after a leader loss, the two
+ * live nodes cannot form any authority (both latch SAFE). Safety holds in
+ * both parts by the LOT 2 rules; consistency and liveness do not. */
+static void tc_065_removal_consistency_before_quorum_change(void)
+{
+    l5_cfg_result_t a, b;
+    printf("TC-065  membership reduction must be consistently committed before it affects quorum [Lot 5]\n");
+    run_l5_config_scenario(1u, &a);
+    check(a.li >= 0, "Lot 5", "scenario A established");
+    if (a.li < 0) { return; }
+    check(a.max_valid <= 1u && a.term_regressions == 0u, "INV-RECONFIG-LOT2", "A: at most one valid authority, no term regression");
+    check(a.new_leader < 0 || l5_popcount(a.new_leader_mask) >= 2u, "INV-RECONFIG-AUTHORITY",
+          "A: no leadership was acquired with fewer than two counted votes");
+    check(a.rej_after != a.rej_before, "INV-RECONFIG-CONSISTENT",
+          "A: peers detected the participant whose deployed configuration (cluster_size 1) differs from theirs");
+    check(!a.ack_recorded, "INV-RECONFIG-CONSISTENT",
+          "A: the leader did not record the inconsistently configured node's ACK as current-term quorum evidence");
+    check(a.new_leader >= 0 && !a.mixed_config_authority, "INV-RECONFIG-TRANSITION",
+          "A: after the leader loss, authority rests only on votes from participants sharing one committed configuration");
+    printf("        A: node %d cold-restarted with cluster_size 1 while connected: peer rejections %u -> %u, ACK recorded as evidence: %s; after leader %d crashed: new leader node %d (cluster_size %u) with vote mask 0x%02X, grants by node %d: %u\n",
+           a.f + 1, a.rej_before, a.rej_after, a.ack_recorded ? "yes" : "no", a.li + 1, a.new_leader + 1,
+           a.new_leader_cs, a.new_leader_mask, a.f + 1, a.f_grants);
+
+    run_l5_config_scenario(5u, &b);
+    check(b.li >= 0, "Lot 5", "scenario B established");
+    if (b.li < 0) { return; }
+    check(b.max_valid <= 1u && b.term_regressions == 0u, "INV-RECONFIG-LOT2", "B: at most one valid authority, no term regression");
+    check(b.rej_after != b.rej_before, "INV-RECONFIG-CONSISTENT",
+          "B: peers detected the participant whose deployed configuration (cluster_size 5) differs from theirs");
+    check(b.new_leader >= 0, "INV-RECONFIG-TRANSITION",
+          "B: two live nodes under the committed three-node configuration regained a valid leader after the leader loss");
+    printf("        B: node %d cold-restarted with cluster_size 5 while connected: peer rejections %u -> %u; after leader %d crashed: valid leader %s%d; end states %s/%s/%s, cluster_size %u/%u/%u\n",
+           b.f + 1, b.rej_before, b.rej_after, b.li + 1, b.new_leader >= 0 ? "node " : "none ", b.new_leader >= 0 ? b.new_leader + 1 : 0,
+           l4_state_name(b.state_end[0]), l4_state_name(b.state_end[1]), l4_state_name(b.state_end[2]),
+           b.cs_end[0], b.cs_end[1], b.cs_end[2]);
+}
+
+/* Scenario driver shared by TC-066 and TC-070: a node is out of service for
+ * 5000 ms (the intended committed removal), cold restarts, and the leader
+ * is then lost so that the election that follows shows whether the
+ * returned node is counted. */
+typedef struct {
+    int      li, r, s;
+    uint16_t term_rejoin;
+    bool     ack_recorded;
+    int      new_leader;
+    uint8_t  new_leader_mask;
+    uint32_t r_grants;
+    bool     r_counted;                  /* r led, or r's grant is in the new leader's mask */
+    uint32_t max_valid, term_regressions;
+    uint32_t hash;
+} l5_rejoin_result_t;
+
+static void run_l5_rejoin_scenario(l5_rejoin_result_t *r)
+{
+    traj_obs_t t;
+    uint32_t k, g0;
+    memset(r, 0, sizeof(*r));
+    r->li = r->r = r->s = r->new_leader = -1;
+    r->hash = 2166136261u;
+    bus_init();
+    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    r->li = leader_index();
+    if (r->li < 0) { return; }
+    r->r = (r->li + 2) % N_NODES; r->s = (r->li + 1) % N_NODES;
+    bus_crash_node(r->r);
+    for (k = 0; k < 5000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    bus_restart_node(r->r);                           /* ordinary cold restart, default configuration */
+    traj_init(&t);
+    for (k = 0; k < 1000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
+    r->term_rejoin = g_bus.node[r->r].term;
+    r->ack_recorded = (g_bus.node[r->li].role == MOSAIK_ROLE_LEADER) &&
+                      (g_bus.node[r->li].last_ack_term[r->r] == g_bus.node[r->li].term);
+    g0 = TX(r->r, MOSAIK_MSG_VOTE_GRANT);
+    bus_crash_node(r->li);
+    for (k = 0; k < 3000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
+    r->r_grants = TX(r->r, MOSAIK_MSG_VOTE_GRANT) - g0;
+    r->new_leader = valid_leader_index();
+    if (r->new_leader >= 0) {
+        r->new_leader_mask = g_bus.node[r->new_leader].vote_mask;
+        r->r_counted = (r->new_leader == r->r) || ((r->new_leader_mask & (uint8_t)(1u << r->r)) != 0u);
+    }
+    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-066: removed-node rejoin safety. EXPECTED RED on 7d35cc8. Required
+ * property: after a committed {1,2,3} -> {1,2} transition, node 3 cannot
+ * cold restart and silently regain voting membership. The baseline has no
+ * committed membership, so the returned node is a full voter again: its ACK
+ * is lease evidence and it wins or decides the next election. Under the
+ * baseline's static membership that rejoin is correct (TC-024); it is RED
+ * only against the LOT 5 requirement. */
+static void tc_066_removed_node_rejoin(void)
+{
+    l5_rejoin_result_t r;
+    printf("TC-066  removed node cannot regain voting membership by cold restart [Lot 5]\n");
+    run_l5_rejoin_scenario(&r);
+    check(r.li >= 0, "Lot 5", "scenario established");
+    if (r.li < 0) { return; }
+    check(r.max_valid <= 1u && r.term_regressions == 0u, "INV-RECONFIG-LOT2", "at most one valid authority, no term regression");
+    check(g_bus.restart_count[r.r] == 1u && r.term_rejoin >= 1u, "Lot 5", "the removed node cold-restarted from term 0 and adopted the cluster term");
+    check(!r.ack_recorded, "INV-RECONFIG-REMOVED-NODE",
+          "the leader did not record the returned node's ACK as current-term quorum evidence");
+    check(r.new_leader >= 0 && !r.r_counted, "INV-RECONFIG-REMOVED-NODE",
+          "after the leader loss the returned node neither won leadership nor cast a counted vote");
+    printf("        node %d out of service 5000 ms, cold restart, rejoined at term %u, ACK recorded as evidence: %s; after leader %d crashed: new leader node %d, vote mask 0x%02X, grants by node %d: %u\n",
+           r.r + 1, r.term_rejoin, r.ack_recorded ? "yes" : "no", r.li + 1, r.new_leader + 1, r.new_leader_mask, r.r + 1, r.r_grants);
+}
+
+/* TC-067: stale configuration replay. EXPECTED RED on 7d35cc8. Required
+ * property: after configuration C1 is superseded by C2, replayed C1
+ * traffic cannot restore C1. The baseline carries no configuration
+ * identity: a leader's heartbeat under cluster_size 3 and under
+ * cluster_size 2 is byte-identical, so a receiver cannot tell C1 traffic
+ * from C2 traffic. The LOT 2B term-based replay rejection is re-verified
+ * as a guard. */
+static void tc_067_stale_configuration_replay(void)
+{
+    mosaik_config_t c2;
+    mosaik_frame_t fa, fb, replay;
+    mosaik_msg_t ma, mb;
+    int la, lb, i, l2 = -1, k, v;
+    node_snap_t before[N_NODES], after[N_NODES];
+
+    printf("TC-067  stale configuration replay: configuration identity on the wire [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    la = leader_index();
+    check(la >= 0 && g_bus.last_hb_frame_valid[la], "Lot 5", "C1 run: leader and captured heartbeat");
+    if (la < 0) { return; }
+    fa = g_bus.last_hb_frame[la];
+    mosaik_config_default(&c2); c2.cluster_size = 2u;
+    bus_init_with_cfg(&c2); bus_run(2000u);
+    lb = leader_index();
+    check(lb >= 0 && g_bus.last_hb_frame_valid[lb], "Lot 5", "C2 run: leader and captured heartbeat");
+    if (lb < 0) { return; }
+    fb = g_bus.last_hb_frame[lb];
+    check(mosaik_decode(&fa, &ma) && mosaik_decode(&fb, &mb), "Lot 5", "both captured frames decode");
+    /* RED: no configuration identity. */
+    check(memcmp(&fa, &fb, sizeof(fa)) != 0, "INV-RECONFIG-OLD-CONFIG",
+          "frames emitted under configuration C1 and configuration C2 are distinguishable on the wire");
+    printf("        leader heartbeat under cluster_size 3 (node %d, term %u, seq %u) and under cluster_size 2 (node %d, term %u, seq %u): byte-identical: %s\n",
+           la + 1, ma.term, ma.arg, lb + 1, mb.term, mb.arg, memcmp(&fa, &fb, sizeof(fa)) == 0 ? "yes" : "no");
+
+    /* Guard: LOT 2B term-based replay rejection still holds on the C2 run. */
+    replay = fb;
+    bus_crash_node(lb);
+    for (k = 0; k < 1500 && l2 < 0; k++) {
+        bus_step();
+        if (valid_leader_index() >= 0 && valid_leader_index() != lb) { l2 = valid_leader_index(); }
+    }
+    check(l2 >= 0 && g_bus.node[l2].term > mb.term, "REQ-FUNC-0004", "survivors re-elected at a higher term");
+    if (l2 < 0) { return; }
+    bus_run(300u);
+    for (i = 0; i < N_NODES; i++) { snap_node(&before[i], i); }
+    bus_schedule_delayed(&replay, (uint8_t)(lb + 1), 3u);
+    bus_run(4u);
+    for (i = 0; i < N_NODES; i++) { snap_node(&after[i], i); }
+    v = 1;
+    for (i = 0; i < N_NODES; i++) {
+        if (i == lb) { continue; }
+        if (after[i].stale_term != before[i].stale_term + 1u || !snap_same(&before[i], &after[i])) { v = 0; }
+    }
+    check(v != 0, "INV-NO-STALE-RECOVERY", "replayed old-term heartbeat rejected by term on every survivor, nothing restored");
+}
+
+/* Scenario driver shared by TC-068 and TC-070: a follower is cut off for
+ * 600 ms (below the SAFE latch boundary) while the majority continues; the
+ * intended LOT 5 transition during the partition is that the majority
+ * commits {majority} and the cut-off node is outside it. After the heal the
+ * cut-off node returns with a higher term. */
+typedef struct {
+    int      li, f, b;
+    uint16_t term_major_at_heal, term_f_at_heal;
+    int      leader_after;
+    uint16_t term_after;
+    bool     majority_kept_authority;    /* authority stayed on the majority side at every step after the heal */
+    uint32_t max_valid, term_regressions;
+    uint32_t hash;
+} l5_partition_result_t;
+
+static void run_l5_partition_scenario(l5_partition_result_t *r)
+{
+    traj_obs_t t;
+    uint32_t k;
+    memset(r, 0, sizeof(*r));
+    r->li = r->f = r->b = r->leader_after = -1;
+    r->majority_kept_authority = true;
+    r->hash = 2166136261u;
+    bus_init();
+    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    r->li = leader_index();
+    if (r->li < 0) { return; }
+    survivors_of(r->li, &r->f, &r->b);
+    isolate_node(r->f, true);
+    traj_init(&t);
+    for (k = 0; k < 600u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
+    r->term_major_at_heal = g_bus.node[r->li].term; r->term_f_at_heal = g_bus.node[r->f].term;
+    isolate_node(r->f, false);
+    for (k = 0; k < 2000u; k++) {
+        int v;
+        bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash);
+        v = valid_leader_index();
+        if (v >= 0 && v == r->f) { r->majority_kept_authority = false; }
+    }
+    r->leader_after = valid_leader_index();
+    r->term_after = r->leader_after >= 0 ? g_bus.node[r->leader_after].term : 0u;
+    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-068: partition during reconfiguration. EXPECTED RED on 7d35cc8.
+ * Required property: if communication is interrupted during a membership
+ * transition, the two sides cannot emerge with incompatible authoritative
+ * memberships. The baseline cannot express the transition at all, so the
+ * cut-off node returns with a higher term and takes authority from the
+ * majority that was meant to have committed without it. That takeover is
+ * LOT 2-correct under static membership; it is RED against LOT 5. */
+static void tc_068_partition_during_reconfiguration(void)
+{
+    l5_partition_result_t r;
+    printf("TC-068  partition during an intended membership transition: sides must not emerge with incompatible authority [Lot 5]\n");
+    run_l5_partition_scenario(&r);
+    check(r.li >= 0, "Lot 5", "scenario established");
+    if (r.li < 0) { return; }
+    check(r.max_valid <= 1u && r.term_regressions == 0u, "INV-RECONFIG-LOT2", "at most one valid authority at any step, no term regression");
+    check(r.term_f_at_heal > r.term_major_at_heal, "Lot 5", "the cut-off node advanced its term during the partition (it started elections)");
+    check(r.majority_kept_authority && r.leader_after >= 0 && r.leader_after != r.f, "INV-RECONFIG-TRANSITION",
+          "after the heal, authority stayed with the side that continued under the committed configuration; the cut-off node did not take it");
+    printf("        leader node %d term %u; node %d cut off 600 ms (term %u at heal); after the heal valid leader node %d term %u; majority kept authority: %s\n",
+           r.li + 1, r.term_major_at_heal, r.f + 1, r.term_f_at_heal, r.leader_after + 1, r.term_after,
+           r.majority_kept_authority ? "yes" : "no");
+}
+
+/* TC-069: authority and lease non-regression under reconfiguration-related
+ * conditions. Guard, expected PASS: permanent node loss, delayed pre-loss
+ * traffic, reordered traffic, a short leader partition, cold restart and a
+ * split-brain SAFE, with at most one valid authority throughout and the
+ * LOT 2 lease rules intact. */
+static void tc_069_authority_lease_non_regression(void)
+{
+    int li, r, s, k, l2;
+    uint32_t cut_ms, lost_ms = 0u, ren0;
+    mosaik_frame_t old_hb;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-069  authority and lease non-regression under node loss, replay, reorder, partition, restart and SAFE [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0 && g_bus.last_hb_frame_valid[li], "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    r = (li + 2) % N_NODES; s = (li + 1) % N_NODES;
+    old_hb = g_bus.last_hb_frame[li];
+    l5_init(&l); traj_init(&t);
+    /* permanent loss of one node with its last frames still in flight */
+    bus_schedule_delayed(&old_hb, (uint8_t)(li + 1), 1500u);
+    bus_crash_node(r);
+    l5_run(&l, &t, 3000u);
+    /* reordered traffic on one path for 500 ms */
+    bus_set_net_action((uint8_t)s, (uint8_t)li, NET_REORDER, 0u);
+    l5_run(&l, &t, 500u);
+    bus_set_net_action((uint8_t)s, (uint8_t)li, NET_DELIVER, 0u);
+    l5_run(&l, &t, 500u);
+    /* one-way loss of inbound traffic to the leader: authority must lapse within the lease */
+    li = leader_index();
+    if (li >= 0) {
+        cut_ms = g_bus.now_ms;
+        bus_set_net_action((uint8_t)((li + 1) % N_NODES), (uint8_t)li, NET_DROP, 0u);
+        bus_set_net_action((uint8_t)((li + 2) % N_NODES), (uint8_t)li, NET_DROP, 0u);
+        for (k = 0; k < 1500 && lost_ms == 0u; k++) {
+            bus_step(); traj_step(&t); l5_step(&l);
+            if (!mosaik_has_valid_leadership_authority(&g_bus.node[li])) { lost_ms = g_bus.now_ms - cut_ms; }
+        }
+        check(lost_ms != 0u && lost_ms <= MOSAIK_LEADERSHIP_LEASE_MS + 1u, "INV-RECONFIG-LOT2",
+              "a leader that receives no acknowledgement loses authority within one lease");
+        bus_set_full_connectivity();
+    }
+    l5_run(&l, &t, 1500u);
+    /* cold restart of the lost node and a split-brain SAFE on the current leader */
+    bus_restart_node(r);
+    l5_run(&l, &t, 1500u);
+    ren0 = g_bus.lease_renewals;
+    l2 = split_brain_leader();
+    l5_run(&l, &t, 2000u);
+    check(l2 >= 0, "REQ-SAFE-0003", "split-brain injection latched SAFE");
+    check(t.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1 throughout");
+    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression (cold restart excluded)");
+    check(t.safe_auth_violations == 0u && t.safe_role_violations == 0u, "INV-RECONFIG-LOT3", "SAFE node never held authority or a non-follower role");
+    check(l.cs_changes == 0u && l5_min_grants_any(&l) >= 2u, "INV-RECONFIG-QUORUM", "cluster_size constant; every leadership acquisition counted at least 2 votes");
+    check(g_bus.lease_renewals == g_bus.quorum_contact_events, "INV-RECONFIG-LOT2", "every lease renewal coincided with an accepted peer acknowledgement");
+    printf("        authority lost %u ms after inbound loss (lease %u ms); lease renewals after SAFE %u; max valid %u; leadership acquisitions n1=%u n2=%u n3=%u\n",
+           lost_ms, (unsigned)MOSAIK_LEADERSHIP_LEASE_MS, g_bus.lease_renewals - ren0, t.max_valid,
+           l.leader_acq[0], l.leader_acq[1], l.leader_acq[2]);
+}
+
+/* TC-070: determinism of the LOT 5 RED scenarios, run A against run B,
+ * independent of whether the LOT 5 properties hold. */
+static void tc_070_determinism_of_lot5_scenarios(void)
+{
+    l5_cfg_result_t a1, b1;
+    l5_rejoin_result_t a2, b2;
+    l5_partition_result_t a3, b3;
+    printf("TC-070  determinism of the TC-065, TC-066 and TC-068 scenarios (run A vs run B) [Lot 5]\n");
+    run_l5_config_scenario(1u, &a1); run_l5_config_scenario(1u, &b1);
+    run_l5_rejoin_scenario(&a2);      run_l5_rejoin_scenario(&b2);
+    run_l5_partition_scenario(&a3);   run_l5_partition_scenario(&b3);
+    check(a1.hash == b1.hash && memcmp(&a1, &b1, sizeof(a1)) == 0, "Lot 5", "TC-065 scenario A reproduced exactly");
+    check(a2.hash == b2.hash && memcmp(&a2, &b2, sizeof(a2)) == 0, "Lot 5", "TC-066 scenario reproduced exactly");
+    check(a3.hash == b3.hash && memcmp(&a3, &b3, sizeof(a3)) == 0, "Lot 5", "TC-068 scenario reproduced exactly");
+    printf("        hashes 0x%08X 0x%08X 0x%08X reproduced: %s %s %s\n", a1.hash, a2.hash, a3.hash,
+           a1.hash == b1.hash ? "yes" : "no", a2.hash == b2.hash ? "yes" : "no", a3.hash == b3.hash ? "yes" : "no");
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -4352,6 +5081,18 @@ int main(void)
     tc_058_partition_crash_restart_legality();
     tc_059_lower_term_safe_announcement();
     tc_060_determinism_of_red_scenarios();
+
+    /* LOT 5: autonomous reconfiguration (Phase 1 RED baseline: TC-064..TC-068 expected RED) */
+    tc_061_membership_fixed();
+    tc_062_peer_loss_is_not_removal();
+    tc_063_minority_cannot_self_reconfigure();
+    tc_064_membership_change_unavailable();
+    tc_065_removal_consistency_before_quorum_change();
+    tc_066_removed_node_rejoin();
+    tc_067_stale_configuration_replay();
+    tc_068_partition_during_reconfiguration();
+    tc_069_authority_lease_non_regression();
+    tc_070_determinism_of_lot5_scenarios();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
