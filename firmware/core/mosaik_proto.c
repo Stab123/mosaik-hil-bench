@@ -3,11 +3,11 @@
 /* Payload layout, 8 bytes:
  *   [0] protocol version
  *   [1] source node id
- *   [2] role
- *   [3] state
- *   [4] term, low byte
- *   [5] term, high byte
- *   [6] arg (seq / vote target / safe cause)
+ *   [2] role                 (CONFIG: stage)
+ *   [3] state                (CONFIG: membership mask)
+ *   [4] term, low byte       (CONFIG: configuration epoch, low byte)
+ *   [5] term, high byte      (CONFIG: configuration epoch, high byte)
+ *   [6] arg (seq / vote target / safe cause / CONFIG ACCEPT proposer id)
  *   [7] CRC-8 over bytes 0..6
  */
 
@@ -36,6 +36,7 @@ static uint32_t base_for_type(mosaik_msg_type_t type)
     case MOSAIK_MSG_VOTE_GRANT: return MOSAIK_ID_VOTE_GRANT_BASE;
     case MOSAIK_MSG_HEARTBEAT:  return MOSAIK_ID_HEARTBEAT_BASE;
     case MOSAIK_MSG_ACK:        return MOSAIK_ID_ACK_BASE;
+    case MOSAIK_MSG_CONFIG:     return MOSAIK_ID_CONFIG_BASE;
     default:                    return 0u;
     }
 }
@@ -46,8 +47,13 @@ void mosaik_encode(mosaik_frame_t *frame, const mosaik_msg_t *msg)
     frame->dlc = MOSAIK_DLC;
     frame->data[0] = MOSAIK_PROTO_VERSION;
     frame->data[1] = msg->src;
-    frame->data[2] = (uint8_t)msg->role;
-    frame->data[3] = (uint8_t)msg->state;
+    if (msg->type == MOSAIK_MSG_CONFIG) {
+        frame->data[2] = msg->cfg_stage;
+        frame->data[3] = (uint8_t)(msg->cfg_mask & 0x07u);
+    } else {
+        frame->data[2] = (uint8_t)msg->role;
+        frame->data[3] = (uint8_t)msg->state;
+    }
     frame->data[4] = (uint8_t)(msg->term & 0xFFu);
     frame->data[5] = (uint8_t)((msg->term >> 8) & 0xFFu);
     frame->data[6] = msg->arg;
@@ -84,6 +90,10 @@ bool mosaik_decode(const mosaik_frame_t *frame, mosaik_msg_t *msg)
                frame->id <= MOSAIK_ID_SAFE_BASE + MOSAIK_MAX_NODES) {
         type = MOSAIK_MSG_SAFE;
         offset = MOSAIK_ID_SAFE_BASE;
+    } else if (frame->id > MOSAIK_ID_CONFIG_BASE &&
+               frame->id <= MOSAIK_ID_CONFIG_BASE + MOSAIK_MAX_NODES) {
+        type = MOSAIK_MSG_CONFIG;
+        offset = MOSAIK_ID_CONFIG_BASE;
     } else {
         return false;
     }
@@ -101,18 +111,35 @@ bool mosaik_decode(const mosaik_frame_t *frame, mosaik_msg_t *msg)
     if (frame->data[1] == 0u || frame->data[1] > MOSAIK_MAX_NODES) {
         return false;
     }
-    if (frame->data[2] > (uint8_t)MOSAIK_ROLE_LEADER) {
-        return false;
-    }
-    if (frame->data[3] > (uint8_t)MOSAIK_STATE_SAFE) {
-        return false;
+    if (type == MOSAIK_MSG_CONFIG) {
+        /* Lot 5: stage 1..4, non-empty membership mask within bits 0..2. */
+        if (frame->data[2] < (uint8_t)MOSAIK_CFG_PROPOSE ||
+            frame->data[2] > (uint8_t)MOSAIK_CFG_ANNOUNCE) {
+            return false;
+        }
+        if (frame->data[3] == 0u || (frame->data[3] & (uint8_t)~0x07u) != 0u) {
+            return false;
+        }
+        msg->role      = MOSAIK_ROLE_FOLLOWER;
+        msg->state     = MOSAIK_STATE_INIT;
+        msg->cfg_stage = frame->data[2];
+        msg->cfg_mask  = frame->data[3];
+    } else {
+        if (frame->data[2] > (uint8_t)MOSAIK_ROLE_LEADER) {
+            return false;
+        }
+        if (frame->data[3] > (uint8_t)MOSAIK_STATE_SAFE) {
+            return false;
+        }
+        msg->role      = (mosaik_role_t)frame->data[2];
+        msg->state     = (mosaik_state_t)frame->data[3];
+        msg->cfg_stage = (uint8_t)MOSAIK_CFG_NONE;
+        msg->cfg_mask  = 0u;
     }
 
     msg->type    = type;
     msg->version = frame->data[0];
     msg->src     = frame->data[1];
-    msg->role    = (mosaik_role_t)frame->data[2];
-    msg->state   = (mosaik_state_t)frame->data[3];
     msg->term    = (uint16_t)(frame->data[4] | ((uint16_t)frame->data[5] << 8));
     msg->arg     = frame->data[6];
     return true;

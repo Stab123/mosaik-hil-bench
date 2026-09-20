@@ -35,7 +35,11 @@ typedef struct {
     uint16_t election_timeout_min_ms;
     uint16_t election_timeout_max_ms;
     uint16_t vote_timeout_ms;
-    uint8_t  cluster_size;
+    uint8_t  cluster_size;         /* Legacy boot parameter. Since Lot 5 it is
+                                    * NOT the membership: quorum is derived from
+                                    * the committed membership mask (see
+                                    * mosaik_config_store_t). Retained for
+                                    * backward-compatible configuration only. */
     uint8_t  max_failed_elections; /* before declaring SAFE / NO_QUORUM */
     /* Candidate retry backoff span (Lot 2D, C2-a). When a candidate's vote
      * timeout expires without quorum and SAFE is not reached, the node waits
@@ -55,6 +59,31 @@ void mosaik_config_default(mosaik_config_t *cfg);
  * leadership authority. This is a host-model parameter; it does not validate
  * physical CAN-FD timing. */
 #define MOSAIK_LEADERSHIP_LEASE_MS 500u
+
+/* Lot 5: committed configuration and its host-model persistence.
+ *
+ * Membership is an explicit 3-bit voter mask (bit n-1 = node n) identified
+ * by (config_epoch, mask). The configuration epoch is a membership epoch,
+ * independent of the leadership term. A node changes its committed
+ * configuration only through the CONFIG transaction (PROPOSE, ACCEPT,
+ * COMMIT/ANNOUNCE) and only to epoch + 1.
+ *
+ * HOST-MODEL PERSISTENCE ONLY. The store is memory owned by the caller
+ * that survives the modelled crash and cold restart of one node. It holds
+ * exactly what the node itself wrote before crashing: its committed
+ * (epoch, mask) and its single acceptance binding for the next epoch.
+ * No FRAM/NVM hardware, no persistence of term, vote or SAFE is claimed
+ * or modelled. A node without a store (NULL) is volatile and boots with
+ * the default configuration. */
+#define MOSAIK_CONFIG_EPOCH_INITIAL 1u
+#define MOSAIK_MEMBERSHIP_ALL       0x07u
+
+typedef struct {
+    uint16_t committed_epoch;   /* 0 = empty store */
+    uint8_t  committed_mask;
+    uint16_t accepted_epoch;    /* acceptance binding: one successor per epoch */
+    uint8_t  accepted_mask;
+} mosaik_config_store_t;
 
 /* Message rejection reason codes for test instrumentation. */
 typedef enum {
@@ -109,6 +138,34 @@ typedef struct {
     uint32_t         last_safe_rx_ms[4];
     uint8_t          safe_evidence_mask;
 
+    /* Lot 5: per-peer time of the last accepted current-term ACK (own
+     * clock), the evidence the leadership-lease quorum predicate reads. */
+    uint32_t         last_ack_rx_ms[4];
+
+    /* Lot 5: committed configuration, acceptance binding and the
+     * proposer's volatile transaction state. */
+    uint16_t         committed_epoch;
+    uint8_t          committed_mask;
+    uint16_t         accepted_epoch;     /* == committed_epoch + 1 while a promise is pending */
+    uint8_t          accepted_mask;
+    bool             proposing;
+    uint16_t         proposal_epoch;
+    uint8_t          proposal_mask;
+    uint8_t          accept_set;         /* members whose ACCEPT was actually received (incl. self) */
+    uint32_t         proposal_start_ms;
+    uint32_t         last_propose_tx_ms;
+    uint32_t         last_cfg_announce_ms;
+    mosaik_config_store_t *store;        /* host-model persistent store, may be NULL */
+
+    /* Lot 5 rejection / observation counters (test instrumentation). */
+    uint32_t         nonmember_rejections;      /* consensus frame from/for a non-member */
+    uint32_t         config_stale_rejections;   /* CONFIG epoch below the committed one */
+    uint32_t         config_future_rejections;  /* CONFIG epoch beyond committed + 1 */
+    uint32_t         config_conflict_rejections;/* second successor for the same epoch */
+    uint32_t         config_duplicates;         /* idempotent repeats */
+    uint32_t         config_mismatch_observed;  /* same epoch, different mask (inconsistency) */
+    uint32_t         config_commits;
+
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;
     uint32_t         safe_entry_ms;
@@ -149,5 +206,36 @@ bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node);
 
 /* Get the last rejection reason (for test instrumentation). */
 mosaik_reject_reason_t mosaik_get_last_reject_reason(const mosaik_node_t *node);
+
+/* Lot 5: attach the node's own host-model configuration store and load the
+ * committed configuration and acceptance binding it holds. An empty store
+ * is initialised to the default configuration (all nodes, epoch 1). Call
+ * once after mosaik_init(). */
+void mosaik_load_config_store(mosaik_node_t *node, mosaik_config_store_t *store);
+
+/* Lot 5: external command starting a membership transaction towards
+ * target_mask. Accepted only from a committed member holding valid
+ * leadership authority with no transaction pending, for a mask that is a
+ * non-empty subset of the three nodes with at least two members, includes
+ * the requester, differs from the committed mask and does not conflict
+ * with an acceptance already bound for the next epoch. Returns whether the
+ * PROPOSE was issued; it never commits anything by itself. */
+bool mosaik_request_reconfiguration(mosaik_node_t *node, uint8_t target_mask);
+
+/* Lot 5: true while this node belongs to its committed membership. */
+bool mosaik_is_member(const mosaik_node_t *node);
+
+/* Lot 5: the nodes that take part in consensus from this node's point of
+ * view: its committed membership, joined with the accepted successor while
+ * an acceptance is pending (joint participation set). Quorum is NOT taken
+ * over this set; see mosaik_has_quorum_ack_evidence(). */
+uint8_t mosaik_effective_members(const mosaik_node_t *node);
+
+/* Lot 5: true when this leader holds fresh (within one heartbeat period),
+ * current-term acknowledgements actually received from a quorum of its
+ * committed membership AND, while an acceptance is pending, from a quorum
+ * of the accepted successor, the leader itself included. Used by the
+ * caller's lease renewal; outbound traffic never counts. */
+bool mosaik_has_quorum_ack_evidence(const mosaik_node_t *node);
 
 #endif /* MOSAIK_NODE_H */

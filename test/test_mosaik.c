@@ -80,7 +80,19 @@ typedef struct {
 
     /* LOT 3 OBSERVATION: frames actually emitted per source node and message
      * type, counted in bus_tx(). Read by tests only; never read by any node. */
-    uint32_t tx_count[N_NODES][6];
+    uint32_t tx_count[N_NODES][7];
+
+    /* LOT 5 OBSERVATION: CONFIG frames emitted per node and stage, and a copy
+     * of the last one per stage (for replay tests). Read by tests only. */
+    uint32_t       tx_cfg_count[N_NODES][5];
+    mosaik_frame_t last_cfg_frame[N_NODES][5];
+    bool           last_cfg_frame_valid[N_NODES][5];
+
+    /* LOT 5 HOST-MODEL PERSISTENCE: one configuration store per node. It is
+     * the node's own persistent memory: written only by the node, handed
+     * back to it at cold restart, cleared with the whole bus. It is never
+     * read by any other node and never derived from topology. */
+    mosaik_config_store_t store[N_NODES];
 
     /* LOT 4 OBSERVATION: raw state and role bytes of every frame actually
      * emitted by a running node, read in bus_tx() before decoding, and a
@@ -106,20 +118,29 @@ static void bus_tx(const mosaik_frame_t *frame, void *user)
     /* LOT 3 OBSERVATION only: record what this node actually emitted. */
     if (src_idx >= 0 && src_idx < N_NODES) {
         mosaik_msg_t obs;
-        /* LOT 4 OBSERVATION only: raw emitted state/role bytes. */
-        if (frame->data[3] <= (uint8_t)MOSAIK_STATE_SAFE) {
-            g_bus.tx_state_byte_count[frame->data[3]]++;
-        } else {
-            g_bus.tx_state_byte_out_of_range++;
+        bool is_cfg = frame->id > MOSAIK_ID_CONFIG_BASE && frame->id <= MOSAIK_ID_CONFIG_BASE + MOSAIK_MAX_NODES;
+        /* LOT 4 OBSERVATION only: raw emitted state/role bytes (bytes 2 and 3
+         * of a CONFIG frame are stage and mask, not role and state). */
+        if (!is_cfg) {
+            if (frame->data[3] <= (uint8_t)MOSAIK_STATE_SAFE) {
+                g_bus.tx_state_byte_count[frame->data[3]]++;
+            } else {
+                g_bus.tx_state_byte_out_of_range++;
+            }
+            if (frame->data[2] > (uint8_t)MOSAIK_ROLE_LEADER) {
+                g_bus.tx_role_byte_out_of_range++;
+            }
         }
-        if (frame->data[2] > (uint8_t)MOSAIK_ROLE_LEADER) {
-            g_bus.tx_role_byte_out_of_range++;
-        }
-        if (mosaik_decode(frame, &obs) && (int)obs.type >= 0 && (int)obs.type < 6) {
+        if (mosaik_decode(frame, &obs) && (int)obs.type >= 0 && (int)obs.type < 7) {
             g_bus.tx_count[src_idx][(int)obs.type]++;
             if (obs.type == MOSAIK_MSG_HEARTBEAT) {
                 g_bus.last_hb_frame[src_idx] = *frame;
                 g_bus.last_hb_frame_valid[src_idx] = true;
+            }
+            if (obs.type == MOSAIK_MSG_CONFIG && obs.cfg_stage >= 1u && obs.cfg_stage <= 4u) {
+                g_bus.tx_cfg_count[src_idx][obs.cfg_stage]++;
+                g_bus.last_cfg_frame[src_idx][obs.cfg_stage] = *frame;
+                g_bus.last_cfg_frame_valid[src_idx][obs.cfg_stage] = true;
             }
         }
     }
@@ -228,32 +249,17 @@ static void bus_update_leader_inbound(int to_node, int from_node, uint16_t term)
 /* - Freshness-bounded (within lease window) */
 
 static bool bus_leader_has_inbound_quorum(int leader_idx)
-
 {
     if (leader_idx < 0 || leader_idx >= N_NODES) return false;
     if (!g_bus.powered[leader_idx]) return false;
     if (g_bus.node[leader_idx].role != MOSAIK_ROLE_LEADER) return false;
-    
-    uint16_t current_term = g_bus.node[leader_idx].term;
-    uint32_t cutoff_ms = g_bus.now_ms - g_bus.node[leader_idx].cfg.heartbeat_period_ms;
-    int inbound_count = 0;
-    
-    for (int k = 0; k < N_NODES; k++) {
-        if (k != leader_idx) {
-            /* Direct inbound message evidence only: */
-            /* - Actually received by leader (recorded in inbound tracking) */
-            /* - Current term */
-            /* - Within lease freshness window */
-            /* The peer's powered/crashed state is deliberately NOT consulted:
-             * a real leader cannot know it; stale evidence simply ages out. */
-            if (g_bus.leader_last_inbound_ms[leader_idx][k] > cutoff_ms &&
-                g_bus.leader_last_inbound_term[leader_idx][k] == current_term) {
-                inbound_count++;
-            }
-        }
-    }
-    /* For 3-node cluster, quorum = 2. Leader itself counts as 1, need 1 more. */
-    return inbound_count >= 1;
+    /* Lot 5: the quorum is the node's own judgement over the acknowledgements
+     * it actually received, in its current term, within one heartbeat
+     * period, from members of its committed configuration (and of the
+     * accepted successor while one is pending). The former harness rule
+     * "one acknowledgement from any peer is a majority" is gone. The peer's
+     * powered/crashed state is still never consulted. */
+    return mosaik_has_quorum_ack_evidence(&g_bus.node[leader_idx]);
 }
 
 /* Lot 2C: Check if leader has fresh inbound quorum contact from current term. */
@@ -352,6 +358,8 @@ static void bus_init_with_cfg(const mosaik_config_t *cfg)
     for (i = 0; i < N_NODES; i++) {
         mosaik_init(&g_bus.node[i], (uint8_t)(i + 1), cfg,
                     bus_tx, (void *)(uintptr_t)(i + 1), 0u);
+        /* Lot 5: the node's own (empty) store, initialised by the node. */
+        mosaik_load_config_store(&g_bus.node[i], &g_bus.store[i]);
     }
 }
 
@@ -392,6 +400,8 @@ static void bus_restart_node(int node_idx)
     /* Full cold re-initialization - term=0, voted_for=0, voted_term=0, etc. */
     mosaik_init(&g_bus.node[node_idx], (uint8_t)(node_idx + 1), &cfg,
                 bus_tx, (void *)(uintptr_t)(node_idx + 1), g_bus.now_ms);
+    /* Lot 5: only the node's own persisted configuration comes back. */
+    mosaik_load_config_store(&g_bus.node[node_idx], &g_bus.store[node_idx]);
 }
 
 static void bus_step(void)
@@ -4281,43 +4291,40 @@ static void tc_060_determinism_of_red_scenarios(void)
 }
 
 /* ------------------------------------------------------------------
- * LOT 5: autonomous reconfiguration (Phase 1 RED baseline).
+ * LOT 5: autonomous reconfiguration (Phase 2 GREEN).
  *
- * LOT 5 asks whether a safe membership / quorum reconfiguration can be
- * introduced without breaking the LOT 2 to LOT 4 invariants. Phase 1 only
- * characterises the frozen baseline: membership is the configuration
- * parameter cluster_size copied once by mosaik_init(); quorum is
- * cluster_size / 2 + 1 and is evaluated only when a VOTE_GRANT is
- * received; no frame carries membership or a configuration identity; no
- * node remembers a removed peer. TC-061 to TC-063 and TC-069, TC-070 are
- * characterisation or guard tests expected to pass. TC-064 to TC-068
- * express externally observable LOT 5 properties and are EXPECTED TO FAIL
- * on 7d35cc8 because the capability is absent, not because of any test
- * placeholder.
+ * Membership is an explicit committed voter mask identified by a
+ * configuration epoch that is independent of the leadership term. It is
+ * changed only by the CONFIG transaction (PROPOSE, ACCEPT, COMMIT) and is
+ * carried in the node's own host-model configuration store across a cold
+ * restart. Reachability is never membership.
  *
- * Rules: no node field is written from a test. Faults use the network
- * model, crash and cold restart, frame injection and delayed delivery. The
- * only membership input the product offers is the configuration passed to
- * mosaik_init(); two tests deliberately cold-restart one node with a
- * different deployed configuration through that public interface (an
- * out-of-band operator action) to measure whether the protocol can detect
- * or contain an inconsistent configuration. That is observation of the
- * product's response, not a protocol operation, and it is labelled as such
- * in each test. Harness knowledge is used for assertions only.
+ * Rules honoured by these tests: no node field is ever written from a
+ * test; the only way a membership changes is the public request API
+ * called on a node that legitimately holds authority, or CONFIG frames
+ * actually received; faults use the directional network model, crash and
+ * cold restart, frame injection and delayed delivery; harness knowledge
+ * (topology, crashed[], other nodes' state) is used for assertions only.
+ * The configuration store of a node is written by the harness only to
+ * inject a persistence fault, which is labelled where it happens.
  * ------------------------------------------------------------------- */
 
-/* Cold restart with an explicitly deployed configuration: identical to
- * bus_restart_node() except for the configuration handed to mosaik_init().
- * Models an operator reflashing one node's configuration. Nothing is
- * written to the node besides what mosaik_init() itself initialises. */
-static void bus_restart_node_with_cfg(int node_idx, const mosaik_config_t *cfg)
+/* LOT 5 FAULT INJECTION INTO THE PERSISTENCE MODEL: cold restart with the
+ * node's own store overwritten by the given content (a stale, foreign or
+ * malformed configuration). Models corrupted configuration memory. Nothing
+ * else about the node is written, and no other node can read this store. */
+static void bus_restart_node_with_store(int node_idx, const mosaik_config_store_t *store)
 {
+    mosaik_config_t cfg;
     if (node_idx < 0 || node_idx >= N_NODES) { return; }
     if (!g_bus.crashed[node_idx]) { return; }
+    mosaik_config_default(&cfg);
     g_bus.crashed[node_idx] = false;
     g_bus.restart_count[node_idx]++;
-    mosaik_init(&g_bus.node[node_idx], (uint8_t)(node_idx + 1), cfg,
+    g_bus.store[node_idx] = *store;
+    mosaik_init(&g_bus.node[node_idx], (uint8_t)(node_idx + 1), &cfg,
                 bus_tx, (void *)(uintptr_t)(node_idx + 1), g_bus.now_ms);
+    mosaik_load_config_store(&g_bus.node[node_idx], &g_bus.store[node_idx]);
 }
 
 static uint8_t l5_popcount(uint8_t v)
@@ -4327,26 +4334,23 @@ static uint8_t l5_popcount(uint8_t v)
     return c;
 }
 
-/* The set of sources whose grants and acknowledgements this node would
- * count, derived read-only from what the node can accept: the decoder
- * admits sources 1..MOSAIK_MAX_NODES and the handlers filter nothing by
- * membership, so the set is 1..min(cluster_size, MOSAIK_MAX_NODES). */
+static uint8_t l5_quorum(uint8_t mask) { return (uint8_t)((l5_popcount(mask) / 2u) + 1u); }
+
+static uint8_t l5_bit(int idx) { return (uint8_t)(1u << idx); }
+
+/* The nodes this node takes part in consensus with, read-only. */
 static uint8_t observed_voters(int idx)
 {
-    unsigned n = g_bus.node[idx].cfg.cluster_size, i;
-    uint8_t m = 0u;
-    if (n > MOSAIK_MAX_NODES) { n = MOSAIK_MAX_NODES; }
-    for (i = 0u; i < n; i++) { m |= (uint8_t)(1u << i); }
-    return m;
+    return mosaik_effective_members(&g_bus.node[idx]);
 }
 
 /* Exhaustive probe of the 11-bit identifier space: how many identifiers
  * decode at all, per message type, with a well-formed payload. */
-static void l5_probe_identifier_space(uint32_t per_type[6], uint32_t *decodable, uint32_t *beyond_known)
+static void l5_probe_identifier_space(uint32_t per_type[8], uint32_t *decodable, uint32_t *beyond_known)
 {
     uint32_t id;
     int k;
-    for (k = 0; k < 6; k++) { per_type[k] = 0u; }
+    for (k = 0; k < 8; k++) { per_type[k] = 0u; }
     *decodable = 0u; *beyond_known = 0u;
     for (id = 0u; id < 0x800u; id++) {
         uint8_t src;
@@ -4354,12 +4358,12 @@ static void l5_probe_identifier_space(uint32_t per_type[6], uint32_t *decodable,
         for (src = 1u; src <= 3u && !any; src++) {
             mosaik_frame_t f; mosaik_msg_t m;
             f.id = id; f.dlc = MOSAIK_DLC;
-            f.data[0] = MOSAIK_PROTO_VERSION; f.data[1] = src; f.data[2] = 0u; f.data[3] = 1u;
+            f.data[0] = MOSAIK_PROTO_VERSION; f.data[1] = src; f.data[2] = 1u; f.data[3] = 1u;
             f.data[4] = 1u; f.data[5] = 0u; f.data[6] = 0u;
             f.data[7] = mosaik_crc8(f.data, 7u);
             if (mosaik_decode(&f, &m)) {
                 any = true;
-                if ((int)m.type >= 0 && (int)m.type < 6) { per_type[(int)m.type]++; }
+                if ((int)m.type >= 0 && (int)m.type < 8) { per_type[(int)m.type]++; }
                 if ((int)m.type > (int)MOSAIK_MSG_ACK || (int)m.type < 1) { (*beyond_known)++; }
             }
         }
@@ -4367,14 +4371,31 @@ static void l5_probe_identifier_space(uint32_t per_type[6], uint32_t *decodable,
     }
 }
 
-/* Read-only membership / quorum observer. */
+/* Build a CONFIG message for targeted injection (replay / malformed tests). */
+static void make_cfg_msg(mosaik_msg_t *m, uint8_t src, mosaik_cfg_stage_t stage,
+                         uint16_t epoch, uint8_t mask, uint8_t arg)
+{
+    memset(m, 0, sizeof(*m));
+    m->type = MOSAIK_MSG_CONFIG; m->src = src; m->version = MOSAIK_PROTO_VERSION;
+    m->role = MOSAIK_ROLE_FOLLOWER; m->state = MOSAIK_STATE_INIT;
+    m->term = epoch; m->arg = arg; m->cfg_stage = (uint8_t)stage; m->cfg_mask = mask;
+}
+
+/* Per-step read-only membership, quorum and authority observation. */
 typedef struct {
-    uint32_t leader_acq[N_NODES];       /* leadership acquisitions */
-    uint8_t  min_grants[N_NODES];       /* smallest counted vote set at acquisition */
-    uint32_t cs_changes;                /* cluster_size changes without a cold restart */
-    uint8_t  cs_min, cs_max;            /* cluster_size values seen on running nodes */
+    uint32_t max_valid;                       /* INV-LEADER-UNIQUE */
+    uint32_t steps_multi_auth;
+    uint32_t same_epoch_mask_conflicts;       /* INV-RECONFIG-CONSISTENT */
+    uint32_t authority_outside_membership;    /* INV-RECONFIG-AUTHORITY */
+    uint32_t leader_acq[N_NODES];
+    uint8_t  min_votes_in_committed[N_NODES]; /* INV-RECONFIG-QUORUM */
+    uint32_t mask_changes[N_NODES];
+    uint32_t term_regressions;                /* INV-TERM-MONOTONIC */
+    uint16_t epoch_now[N_NODES];
+    uint8_t  mask_now[N_NODES];
     mosaik_role_t last_role[N_NODES];
-    uint8_t  last_cs[N_NODES];
+    uint16_t last_term[N_NODES];
+    uint8_t  last_mask[N_NODES];
     uint32_t last_restart[N_NODES];
 } l5_obs_t;
 
@@ -4382,35 +4403,59 @@ static void l5_init(l5_obs_t *o)
 {
     int i;
     memset(o, 0, sizeof(*o));
-    o->cs_min = 0xFFu; o->cs_max = 0u;
     for (i = 0; i < N_NODES; i++) {
-        o->min_grants[i] = 0xFFu;
-        o->last_role[i] = g_bus.node[i].role;
-        o->last_cs[i] = g_bus.node[i].cfg.cluster_size;
+        o->min_votes_in_committed[i] = 0xFFu;
+        o->last_role[i]    = g_bus.node[i].role;
+        o->last_term[i]    = g_bus.node[i].term;
+        o->last_mask[i]    = g_bus.node[i].committed_mask;
         o->last_restart[i] = g_bus.restart_count[i];
     }
 }
 
 static void l5_step(l5_obs_t *o)
 {
-    int i;
+    int i, j;
+    uint32_t v = (uint32_t)valid_leader_count();
+
+    if (v > o->max_valid) { o->max_valid = v; }
+    if (v > 1u) { o->steps_multi_auth++; }
+
     for (i = 0; i < N_NODES; i++) {
         const mosaik_node_t *n = &g_bus.node[i];
         if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
         if (g_bus.restart_count[i] != o->last_restart[i]) {
             o->last_restart[i] = g_bus.restart_count[i];
-            o->last_cs[i] = n->cfg.cluster_size;
-            o->last_role[i] = n->role;
+            o->last_term[i]    = n->term;
+            o->last_mask[i]    = n->committed_mask;
+            o->last_role[i]    = n->role;
         }
-        if (n->cfg.cluster_size != o->last_cs[i]) { o->cs_changes++; o->last_cs[i] = n->cfg.cluster_size; }
-        if (n->cfg.cluster_size < o->cs_min) { o->cs_min = n->cfg.cluster_size; }
-        if (n->cfg.cluster_size > o->cs_max) { o->cs_max = n->cfg.cluster_size; }
+        if (n->term < o->last_term[i]) { o->term_regressions++; }
+        o->last_term[i] = n->term;
+        if (n->committed_mask != o->last_mask[i]) { o->mask_changes[i]++; o->last_mask[i] = n->committed_mask; }
+        o->epoch_now[i] = n->committed_epoch;
+        o->mask_now[i]  = n->committed_mask;
+
+        if (mosaik_has_valid_leadership_authority(n) && !mosaik_is_member(n)) {
+            o->authority_outside_membership++;
+        }
         if (n->role == MOSAIK_ROLE_LEADER && o->last_role[i] != MOSAIK_ROLE_LEADER) {
-            uint8_t g = l5_popcount(n->vote_mask);
+            uint8_t counted = l5_popcount((uint8_t)(n->vote_mask & n->committed_mask));
             o->leader_acq[i]++;
-            if (g < o->min_grants[i]) { o->min_grants[i] = g; }
+            if (counted < o->min_votes_in_committed[i]) { o->min_votes_in_committed[i] = counted; }
         }
         o->last_role[i] = n->role;
+    }
+    /* Two running nodes must never hold different memberships at the same
+     * configuration epoch: a committed configuration is unique per epoch. */
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        for (j = i + 1; j < N_NODES; j++) {
+            if (g_bus.crashed[j] || !g_bus.powered[j]) { continue; }
+            if (g_bus.node[i].committed_epoch == g_bus.node[j].committed_epoch &&
+                g_bus.node[i].committed_mask  != g_bus.node[j].committed_mask) {
+                o->same_epoch_mask_conflicts++;
+            }
+        }
     }
 }
 
@@ -4420,97 +4465,102 @@ static void l5_run(l5_obs_t *l, traj_obs_t *t, uint32_t ms)
     for (k = 0; k < ms; k++) { bus_step(); if (t) { traj_step(t); } l5_step(l); }
 }
 
-static uint8_t l5_min_grants_any(const l5_obs_t *o)
+/* Smallest number of committed-membership votes any leadership acquisition
+ * was based on, over all nodes; 0xFF when no acquisition was observed. */
+static uint8_t l5_min_votes_any(const l5_obs_t *o)
 {
     int i; uint8_t m = 0xFFu;
-    for (i = 0; i < N_NODES; i++) { if (o->min_grants[i] < m) { m = o->min_grants[i]; } }
+    for (i = 0; i < N_NODES; i++) { if (o->min_votes_in_committed[i] < m) { m = o->min_votes_in_committed[i]; } }
     return m;
 }
 
-/* TC-061: the three-node membership is fixed. Characterisation, expected
- * PASS: five message types on fifteen identifiers, every payload byte
- * consumed by an existing field, cluster_size never changes at run time,
- * every leadership acquisition counted at least two votes, and a node
- * configured out of band with cluster_size 1 still cannot appoint itself
- * (quorum is evaluated only when a peer grant is received). */
-static void tc_061_membership_fixed(void)
+/* Every running node committed exactly this configuration. */
+static bool l5_all_committed(uint8_t mask, uint16_t epoch)
 {
-    uint32_t per_type[6], decodable, beyond;
+    int i;
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (g_bus.node[i].committed_mask != mask || g_bus.node[i].committed_epoch != epoch) { return false; }
+    }
+    return true;
+}
+
+#define CFGTX(idx, stage) (g_bus.tx_cfg_count[(idx)][(int)(stage)])
+
+/* Run a legitimate reconfiguration request on the node that currently holds
+ * valid authority and let the transaction settle. Returns the request
+ * result; the transaction itself is carried entirely by CONFIG frames. */
+static bool l5_request(int leader_idx, uint8_t target, uint32_t settle_ms, l5_obs_t *l, traj_obs_t *t)
+{
+    bool ok = mosaik_request_reconfiguration(&g_bus.node[leader_idx], target);
+    if (l) { l5_run(l, t, settle_ms); } else { bus_run(settle_ms); }
+    return ok;
+}
+
+/* TC-061: the membership representation is explicit and cfg.cluster_size no
+ * longer decides anything. Characterisation. */
+static void tc_061_membership_representation(void)
+{
+    uint32_t per_type[8], decodable, beyond;
     mosaik_msg_t m, d;
     mosaik_frame_t base, f;
-    int b, li, k, consumed = 0;
-    l5_obs_t l; traj_obs_t t;
     mosaik_config_t cfg1;
+    int b, li, i, consumed = 0;
+    l5_obs_t l; traj_obs_t t;
 
-    printf("TC-061  membership is fixed: five frame types, no spare payload byte, cluster_size and quorum constant [Lot 5]\n");
+    printf("TC-061  membership is an explicit committed mask with its own epoch; cluster_size is inert [Lot 5]\n");
     l5_probe_identifier_space(per_type, &decodable, &beyond);
-    check(decodable == 15u && beyond == 0u && per_type[1] == 3u && per_type[2] == 3u && per_type[3] == 3u &&
-          per_type[4] == 3u && per_type[5] == 3u,
-          "Lot 5", "identifier space: exactly 15 decodable identifiers, three per existing type, none beyond ACK");
+    check(decodable == 18u && per_type[(int)MOSAIK_MSG_CONFIG] == 3u && beyond == 3u,
+          "Lot 5", "the wire protocol carries a membership transaction on its own identifiers (3 CONFIG ids)");
 
-    /* Every payload byte 0..6 is consumed: altering it changes a decoded field or is rejected. */
-    make_msg(&m, MOSAIK_MSG_HEARTBEAT, 2u, MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL, 0x0102u, 7u);
+    /* CONFIG frames carry stage, mask and epoch unambiguously; every byte is used. */
+    make_cfg_msg(&m, 2u, MOSAIK_CFG_PROPOSE, 0x0102u, 0x03u, 0u);
     mosaik_encode(&base, &m);
+    check(mosaik_decode(&base, &d) && d.type == MOSAIK_MSG_CONFIG && d.src == 2u &&
+          d.cfg_stage == (uint8_t)MOSAIK_CFG_PROPOSE && d.cfg_mask == 0x03u && d.term == 0x0102u,
+          "Lot 5", "a CONFIG frame round-trips stage, source, membership mask and configuration epoch");
     for (b = 0; b < 7; b++) {
         f = base;
         f.data[b] = (uint8_t)(f.data[b] ^ 0x01u);
         f.data[7] = mosaik_crc8(f.data, 7u);
         if (!mosaik_decode(&f, &d)) { consumed++; continue; }
-        if (d.version != m.version || d.src != m.src || d.role != m.role || d.state != m.state ||
-            d.term != m.term || d.arg != m.arg) { consumed++; }
+        if (d.version != m.version || d.src != m.src || d.cfg_stage != m.cfg_stage ||
+            d.cfg_mask != m.cfg_mask || d.term != m.term || d.arg != m.arg) { consumed++; }
     }
-    check(consumed == 7, "Lot 5", "no spare payload byte: each of bytes 0..6 is version, src, role, state, term or arg");
+    check(consumed == 7, "Lot 5", "no spare payload byte: each of bytes 0..6 carries a field of the transaction");
 
-    /* cluster_size and quorum under boot, follower isolation, leader crash and cold restart, split-brain. */
+    /* Boot: every node starts from the same committed configuration. */
     bus_init(); l5_init(&l); traj_init(&t);
     l5_run(&l, &t, 2000u);
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL),
+          "INV-RECONFIG-QUORUM", "every node booted committed to {1,2,3} at configuration epoch 1");
     li = leader_index();
-    if (li >= 0) { isolate_node((li + 1) % N_NODES, true); }
-    l5_run(&l, &t, 3000u);
-    if (li >= 0) { isolate_node((li + 1) % N_NODES, false); }
-    l5_run(&l, &t, 1000u);
-    li = leader_index();
-    if (li >= 0) { bus_crash_node(li); }
-    l5_run(&l, &t, 1500u);
-    if (li >= 0) { bus_restart_node(li); }
-    l5_run(&l, &t, 1500u);
-    (void)split_brain_leader();
-    l5_run(&l, &t, 2000u);
-    check(l.cs_changes == 0u && l.cs_min == 3u && l.cs_max == 3u, "INV-RECONFIG-QUORUM",
-          "cluster_size stayed 3 on every running node through isolation, crash, cold restart and SAFE");
-    check(l5_min_grants_any(&l) >= 2u, "INV-RECONFIG-QUORUM", "every leadership acquisition counted at least 2 votes (quorum of 3)");
-    check(t.max_valid <= 1u && t.term_regressions == 0u, "INV-LEADER-UNIQUE", "at most one valid authority, no term regression");
-    printf("        decodable identifiers %u (SAFE %u, VOTE_REQ %u, VOTE_GRANT %u, HEARTBEAT %u, ACK %u); payload bytes consumed 7/7; leadership acquisitions n1=%u n2=%u n3=%u, min counted votes %u\n",
-           decodable, per_type[1], per_type[2], per_type[3], per_type[4], per_type[5],
-           l.leader_acq[0], l.leader_acq[1], l.leader_acq[2], l5_min_grants_any(&l));
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    check(l5_min_votes_any(&l) >= l5_quorum((uint8_t)MOSAIK_MEMBERSHIP_ALL), "INV-RECONFIG-QUORUM",
+          "leadership was acquired only with a quorum of the committed membership");
 
-    /* Out-of-band configuration through the public init interface: a node
-     * cold-restarted with cluster_size 1 (quorum 1) while isolated. */
+    /* cluster_size is no longer authoritative: booting every node with
+     * cluster_size 1 (which used to mean quorum 1) changes nothing. */
     mosaik_config_default(&cfg1); cfg1.cluster_size = 1u;
-    bus_init(); bus_run(2000u);
-    li = leader_index();
-    k = (li + 1) % N_NODES;
-    bus_crash_node(k); bus_run(100u);
-    isolate_node(k, true);
-    bus_restart_node_with_cfg(k, &cfg1);
-    l5_init(&l); traj_init(&t);
-    l5_run(&l, &t, 3000u);
-    check(l.leader_acq[k] == 0u && g_bus.node[k].state == MOSAIK_STATE_SAFE && t.max_valid <= 1u,
-          "INV-RECONFIG-PARTITION", "an isolated node configured with cluster_size 1 never appointed itself and latched SAFE/no-quorum");
-    printf("        isolated node %d with cluster_size 1: leader acquisitions %u, state %s after 3000 ms (quorum is checked only on a received grant)\n",
-           k + 1, l.leader_acq[k], l4_state_name((unsigned)g_bus.node[k].state));
+    bus_init_with_cfg(&cfg1); l5_init(&l); traj_init(&t);
+    l5_run(&l, &t, 2000u);
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL),
+          "INV-RECONFIG-QUORUM", "with cluster_size 1 the committed membership is still {1,2,3}");
+    check(l5_min_votes_any(&l) >= 2u && t.max_valid <= 1u, "INV-RECONFIG-QUORUM",
+          "quorum came from the membership mask, not from cluster_size: still 2 votes required");
+    for (i = 0; i < N_NODES; i++) { check(l.mask_changes[i] == 0u, "INV-RECONFIG-NO-MAGIC",
+          "no node changed its committed membership without a transaction"); }
+    printf("        decodable identifiers %u (CONFIG %u, beyond the five consensus types %u); payload bytes used 7/7; committed {1,2,3} epoch 1 on every node; minimum counted votes per acquisition %u\n",
+           decodable, per_type[(int)MOSAIK_MSG_CONFIG], beyond, l5_min_votes_any(&l));
 }
 
-/* TC-062: peer loss must not imply membership removal. Guard, expected
- * PASS: one follower unreachable for far longer than every timer; the
- * survivors keep quorum 2 of the same 3, cluster_size never shrinks, the
- * unreachable node never holds authority; its LOT 3 SAFE latch is the
- * model's FDIR response, not a membership change. */
+/* TC-062: peer loss is not membership removal. */
 static void tc_062_peer_loss_is_not_removal(void)
 {
     int li, f, b;
     l5_obs_t l; traj_obs_t t;
-    printf("TC-062  peer loss is not membership removal: quorum stays 2 of 3 through a 3000 ms follower isolation [Lot 5]\n");
+    printf("TC-062  peer loss is not membership removal: an unreachable peer stays a committed voter [Lot 5]\n");
     bus_init(); bus_run(2000u);
     li = leader_index();
     check(li >= 0, "Lot 5", "leader existed");
@@ -4519,31 +4569,32 @@ static void tc_062_peer_loss_is_not_removal(void)
     isolate_node(f, true);
     l5_init(&l); traj_init(&t);
     l5_run(&l, &t, 3000u);
-    check(l.cs_changes == 0u && l.cs_min == 3u && l.cs_max == 3u, "INV-RECONFIG-NO-MAGIC",
-          "no node changed its cluster_size because a peer became unreachable");
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL),
+          "INV-RECONFIG-NO-MAGIC", "no node removed the unreachable peer from its committed membership");
     check(observed_voters(li) == 0x07u && observed_voters(b) == 0x07u, "INV-RECONFIG-QUORUM",
-          "survivors still count the same three sources; nothing shrank the voter set");
+          "the survivors still count all three nodes: quorum stayed 2 of 3");
     check(l.leader_acq[f] == 0u && t.safe_auth_violations == 0u, "INV-RECONFIG-AUTHORITY",
           "the unreachable node never acquired leadership or authority");
-    check(valid_leader_index() == li, "INV-LEADER-UNIQUE", "the majority leader kept valid authority throughout");
-    check(t.max_valid <= 1u && t.term_regressions == 0u, "INV-LEADER-UNIQUE", "at most one valid authority, no term regression");
+    check(valid_leader_index() == li && t.max_valid <= 1u, "INV-LEADER-UNIQUE",
+          "the majority leader kept valid authority and no second authority appeared");
+    check(CFGTX(li, MOSAIK_CFG_PROPOSE) == 0u && CFGTX(b, MOSAIK_CFG_PROPOSE) == 0u,
+          "INV-RECONFIG-NO-MAGIC", "loss of contact proposed no membership change");
     isolate_node(f, false);
     l5_run(&l, &t, 1000u);
-    check(l.cs_changes == 0u && valid_leader_index() == li, "INV-RECONFIG-LOT4",
-          "after restore the isolated node's SAFE announcements changed no membership and no authority");
-    printf("        isolated node %d: state %s term %u; leader node %d term %u kept authority; cluster_size %u/%u/%u\n",
-           f + 1, l4_state_name((unsigned)g_bus.node[f].state), g_bus.node[f].term, li + 1, g_bus.node[li].term,
-           g_bus.node[0].cfg.cluster_size, g_bus.node[1].cfg.cluster_size, g_bus.node[2].cfg.cluster_size);
+    check(l.same_epoch_mask_conflicts == 0u && t.term_regressions == 0u, "INV-RECONFIG-CONSISTENT",
+          "after restore every node still holds the same configuration at the same epoch");
+    printf("        isolated node %d: state %s, committed mask 0x%02X epoch %u; leader node %d kept authority; proposals emitted %u\n",
+           f + 1, l4_state_name((unsigned)g_bus.node[f].state), g_bus.node[f].committed_mask,
+           g_bus.node[f].committed_epoch, li + 1, CFGTX(li, MOSAIK_CFG_PROPOSE));
 }
 
-/* TC-063: a minority partition cannot self-reconfigure. Guard, expected
- * PASS: the isolated node of a 2+1 partition exhausts its recovery paths
- * and never obtains authority as a one-node membership. */
+/* TC-063: a minority partition cannot reconfigure itself into a quorum. */
 static void tc_063_minority_cannot_self_reconfigure(void)
 {
     int li, iso;
+    bool req;
     l5_obs_t l; traj_obs_t t;
-    printf("TC-063  minority partition cannot self-reconfigure: isolated node never becomes a one-node quorum [Lot 5]\n");
+    printf("TC-063  minority partition cannot self-reconfigure into its own quorum [Lot 5]\n");
     bus_init(); bus_run(2000u);
     li = leader_index();
     check(li >= 0, "Lot 5", "leader existed");
@@ -4551,415 +4602,448 @@ static void tc_063_minority_cannot_self_reconfigure(void)
     iso = (li + 2) % N_NODES;
     bus_set_partition_2plus1((uint8_t)(iso + 1));
     l5_init(&l); traj_init(&t);
-    l5_run(&l, &t, 5000u);
-    check(l.leader_acq[iso] == 0u && t.max_failed[iso] == g_bus.node[iso].cfg.max_failed_elections &&
-          g_bus.node[iso].state == MOSAIK_STATE_SAFE,
-          "INV-RECONFIG-PARTITION", "isolated node exhausted its elections without ever appointing itself and latched SAFE");
-    check(g_bus.node[iso].cfg.cluster_size == 3u && observed_voters(iso) == 0x07u, "INV-RECONFIG-QUORUM",
-          "isolated node still counts itself as one of three, not as a membership of one");
-    check(t.max_valid <= 1u && valid_leader_index() >= 0 && valid_leader_index() != iso, "INV-LEADER-UNIQUE",
-          "authority remained on the majority side only");
+    l5_run(&l, &t, 1500u);
+    /* The isolated node tries to make itself and one absent peer the cluster. */
+    req = mosaik_request_reconfiguration(&g_bus.node[iso], (uint8_t)(l5_bit(iso) | l5_bit(li)));
+    check(!req, "INV-RECONFIG-PARTITION",
+          "a node without valid leadership authority cannot start a membership transaction");
+    l5_run(&l, &t, 3500u);
+    check(CFGTX(iso, MOSAIK_CFG_PROPOSE) == 0u && CFGTX(iso, MOSAIK_CFG_COMMIT) == 0u,
+          "INV-RECONFIG-PARTITION", "the isolated node proposed and committed nothing");
+    check(g_bus.node[iso].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL, "INV-RECONFIG-QUORUM",
+          "the isolated node still counts itself as one of three, not as a membership of its own");
+    check(l.leader_acq[iso] == 0u && g_bus.node[iso].state == MOSAIK_STATE_SAFE, "INV-RECONFIG-PARTITION",
+          "it exhausted its elections without ever appointing itself and latched SAFE");
+    check(t.max_valid <= 1u && valid_leader_index() >= 0 && valid_leader_index() != iso,
+          "INV-LEADER-UNIQUE", "authority remained on the majority side only");
     bus_heal_partition();
     l5_run(&l, &t, 2000u);
-    check(g_bus.node[iso].state == MOSAIK_STATE_SAFE && l.leader_acq[iso] == 0u && t.safe_auth_violations == 0u,
-          "INV-RECONFIG-LOT3", "after the heal the minority node stayed SAFE without authority");
-    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
-    printf("        minority node %d: %u failed elections, state %s term %u; majority leader node %d term %u\n",
-           iso + 1, t.max_failed[iso], l4_state_name((unsigned)g_bus.node[iso].state), g_bus.node[iso].term,
-           valid_leader_index() + 1, valid_leader_index() >= 0 ? g_bus.node[valid_leader_index()].term : 0u);
+    check(l.same_epoch_mask_conflicts == 0u && l.authority_outside_membership == 0u,
+          "INV-RECONFIG-CONSISTENT", "after the heal no node holds authority outside its committed membership");
+    printf("        minority node %d: request refused, %u proposals, %u failed elections, state %s; majority leader node %d\n",
+           iso + 1, CFGTX(iso, MOSAIK_CFG_PROPOSE), t.max_failed[iso],
+           l4_state_name((unsigned)g_bus.node[iso].state), valid_leader_index() + 1);
 }
 
-/* TC-064: a legitimate membership change is unavailable. EXPECTED RED on
- * 7d35cc8. The operational removal of node 3 (it is out of service for
- * 5000 ms, far beyond every timer) is the intent of the LOT 5 transition
- * {1,2,3} -> {1,2}. The test asks the protocol, through its wire model and
- * the survivors' observable voter set, whether that transition can be
- * proposed, agreed and committed. It cannot: no identifier exists for a
- * membership transaction and the survivors keep counting three sources. */
-static void tc_064_membership_change_unavailable(void)
+/* TC-064: a legitimate {1,2,3} -> two-node transition is proposed, agreed and
+ * committed through the protocol, and the removed node stops being a voter.
+ * Phase 1 asserted that no such capability existed; it now executes. */
+static void tc_064_membership_change_executes(void)
 {
-    uint32_t per_type[6], decodable, beyond, k;
-    int li, r, s, i;
+    int li, keep, rem, i;
+    uint8_t target;
+    bool req;
+    uint16_t term_before;
     l5_obs_t l; traj_obs_t t;
-    uint32_t tx_before[N_NODES][6];
 
-    printf("TC-064  legitimate membership change {1,2,3} -> {1,2} is unavailable through the protocol [Lot 5]\n");
+    printf("TC-064  legitimate membership change: propose, agree, commit, and the removed node stops voting [Lot 5]\n");
     bus_init(); bus_run(2000u);
     li = leader_index();
     check(li >= 0, "Lot 5", "leader existed");
     if (li < 0) { return; }
-    r = (li + 2) % N_NODES;           /* the node to be removed */
-    s = (li + 1) % N_NODES;           /* the other survivor */
-    memcpy(tx_before, g_bus.tx_count, sizeof(tx_before));
-    bus_crash_node(r);
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    term_before = g_bus.node[li].term;
     l5_init(&l); traj_init(&t);
-    l5_run(&l, &t, 5000u);
-    /* Survivors stayed healthy: the transition intent is realistic. */
-    check(valid_leader_index() == li && t.max_valid <= 1u && t.term_regressions == 0u, "INV-RECONFIG-LOT2",
-          "survivors kept one valid leader while the removed node was out of service");
-    /* Every frame the survivors emitted belongs to the five existing types. */
-    for (i = 0, k = 0u; i < N_NODES; i++) { k += g_bus.tx_count[i][0]; }
-    check(k == 0u, "Lot 5", "no frame of an unknown type was emitted");
-    l5_probe_identifier_space(per_type, &decodable, &beyond);
-    /* RED: proposal capability. */
-    check(beyond > 0u, "INV-RECONFIG-NO-MAGIC",
-          "the wire protocol provides an identifier for a membership-change transaction beyond the five existing types");
-    /* RED: agreement/commit capability, observed through the survivors' voter set. */
-    check(observed_voters(li) == (uint8_t)(0x07u & ~(1u << r)) && observed_voters(s) == (uint8_t)(0x07u & ~(1u << r)),
-          "INV-RECONFIG-CONSISTENT",
-          "after 5000 ms without the removed node the survivors' observable voter set excludes it: the removal was proposed, agreed and committed");
-    printf("        removed node %d out of service 5000 ms; survivors' voter sets 0x%02X/0x%02X, cluster_size %u/%u; decodable identifiers %u, beyond known types %u; survivor frames: SAFE %u VOTE_REQ %u VOTE_GRANT %u HEARTBEAT %u ACK %u\n",
-           r + 1, observed_voters(li), observed_voters(s), g_bus.node[li].cfg.cluster_size, g_bus.node[s].cfg.cluster_size,
-           decodable, beyond,
-           g_bus.tx_count[li][1] + g_bus.tx_count[s][1] - tx_before[li][1] - tx_before[s][1],
-           g_bus.tx_count[li][2] + g_bus.tx_count[s][2] - tx_before[li][2] - tx_before[s][2],
-           g_bus.tx_count[li][3] + g_bus.tx_count[s][3] - tx_before[li][3] - tx_before[s][3],
-           g_bus.tx_count[li][4] + g_bus.tx_count[s][4] - tx_before[li][4] - tx_before[s][4],
-           g_bus.tx_count[li][5] + g_bus.tx_count[s][5] - tx_before[li][5] - tx_before[s][5]);
-}
+    req = l5_request(li, target, 200u, &l, &t);
 
-/* Scenario driver shared by TC-065 and TC-070: one follower is cold
- * restarted with an out-of-band deployed configuration (cluster_size cs)
- * through the public init interface while connected; peers are observed
- * for any detection; then the leader is lost and the election that follows
- * is observed. */
-typedef struct {
-    int      li, f, b;
-    uint8_t  cs;
-    uint32_t rej_before, rej_after;      /* survivors' rejection counters (all kinds) */
-    bool     ack_recorded;               /* leader recorded node f's ACK as current-term evidence */
-    uint32_t f_grants;                   /* grants emitted by node f after the leader loss */
-    int      new_leader;
-    uint8_t  new_leader_mask;
-    uint8_t  new_leader_cs;
-    bool     mixed_config_authority;     /* new leader counted a grant from a node with another cluster_size */
-    uint32_t max_valid, term_regressions;
-    unsigned state_end[N_NODES];
-    uint8_t  cs_end[N_NODES];
-    uint32_t hash;
-} l5_cfg_result_t;
+    check(req, "INV-RECONFIG-NO-MAGIC", "the valid leader accepted the external reconfiguration request");
+    check(CFGTX(li, MOSAIK_CFG_PROPOSE) >= 1u && CFGTX(keep, MOSAIK_CFG_ACCEPT) >= 1u &&
+          CFGTX(li, MOSAIK_CFG_COMMIT) >= 1u,
+          "INV-RECONFIG-NO-MAGIC", "the transaction ran on the bus: PROPOSE, ACCEPT and COMMIT frames were emitted");
+    check(l5_all_committed(target, 2u), "INV-RECONFIG-CONSISTENT",
+          "every node, including the removed one, committed the same membership at epoch 2");
+    check(observed_voters(li) == target && observed_voters(keep) == target &&
+          (observed_voters(li) & l5_bit(rem)) == 0u,
+          "INV-RECONFIG-QUORUM", "the surviving members count only the committed membership");
+    check(g_bus.node[li].term == term_before, "INV-TERM-MONOTONIC",
+          "the membership epoch advanced without touching the leadership term");
+    check(valid_leader_index() == li && t.max_valid <= 1u && l.steps_multi_auth == 0u,
+          "INV-LEADER-UNIQUE", "the leader kept valid authority throughout the transaction");
+    check(g_bus.node[rem].state != MOSAIK_STATE_SAFE, "INV-RECONFIG-REMOVED-NODE",
+          "removal is not FDIR: the removed node was not forced into SAFE");
 
-static uint32_t l5_rejections(int i)
-{
-    const mosaik_node_t *n = &g_bus.node[i];
-    return n->stale_term_rejections + n->stale_lease_rejections + n->duplicate_seq_rejections +
-           n->stale_authority_rejections + n->invalid_sender_rejections + n->decode_errors;
-}
-
-static void run_l5_config_scenario(uint8_t cs, l5_cfg_result_t *r)
-{
-    mosaik_config_t cfg;
-    traj_obs_t t;
-    uint32_t k, g0;
-    int i;
-    memset(r, 0, sizeof(*r));
-    r->li = r->f = r->b = r->new_leader = -1; r->cs = cs;
-    r->hash = 2166136261u;
-    mosaik_config_default(&cfg); cfg.cluster_size = cs;
-    bus_init();
-    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
-    r->li = leader_index();
-    if (r->li < 0) { return; }
-    survivors_of(r->li, &r->f, &r->b);
-    bus_crash_node(r->f);
-    for (k = 0; k < 100u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
-    bus_restart_node_with_cfg(r->f, &cfg);           /* out-of-band configuration, cold start */
-    r->rej_before = l5_rejections(r->li) + l5_rejections(r->b);
-    traj_init(&t);
-    for (k = 0; k < 1000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
-    r->rej_after = l5_rejections(r->li) + l5_rejections(r->b);
-    r->ack_recorded = (g_bus.node[r->li].role == MOSAIK_ROLE_LEADER) &&
-                      (g_bus.node[r->li].last_ack_term[r->f] == g_bus.node[r->li].term);
-    g0 = TX(r->f, MOSAIK_MSG_VOTE_GRANT);
-    bus_crash_node(r->li);                            /* leader loss: the two remaining nodes must elect */
-    for (k = 0; k < 3000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
-    r->f_grants = TX(r->f, MOSAIK_MSG_VOTE_GRANT) - g0;
-    r->new_leader = valid_leader_index();
-    if (r->new_leader >= 0) {
-        r->new_leader_mask = g_bus.node[r->new_leader].vote_mask;
-        r->new_leader_cs = g_bus.node[r->new_leader].cfg.cluster_size;
-        for (i = 0; i < N_NODES; i++) {
-            if (i != r->new_leader && (r->new_leader_mask & (uint8_t)(1u << i)) != 0u &&
-                g_bus.node[i].cfg.cluster_size != r->new_leader_cs) { r->mixed_config_authority = true; }
-        }
+    /* The removed node must now be silent in consensus and must stay so. */
+    {
+        uint32_t g0 = TX(rem, MOSAIK_MSG_VOTE_GRANT), a0 = TX(rem, MOSAIK_MSG_ACK),
+                 r0 = TX(rem, MOSAIK_MSG_VOTE_REQ), h0 = TX(rem, MOSAIK_MSG_HEARTBEAT);
+        l5_run(&l, &t, 3000u);
+        check(TX(rem, MOSAIK_MSG_VOTE_GRANT) == g0 && TX(rem, MOSAIK_MSG_ACK) == a0 &&
+              TX(rem, MOSAIK_MSG_VOTE_REQ) == r0 && TX(rem, MOSAIK_MSG_HEARTBEAT) == h0,
+              "INV-RECONFIG-REMOVED-NODE", "the removed node emitted no vote, acknowledgement, request or heartbeat");
+        check(l.leader_acq[rem] == 0u && l.authority_outside_membership == 0u,
+              "INV-RECONFIG-AUTHORITY", "the removed node never held authority after the commit");
+        check(valid_leader_index() == li && t.max_valid <= 1u, "INV-LEADER-UNIQUE",
+              "the two remaining members kept exactly one valid authority");
     }
-    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
-    for (i = 0; i < N_NODES; i++) { r->state_end[i] = (unsigned)g_bus.node[i].state; r->cs_end[i] = g_bus.node[i].cfg.cluster_size; }
-    r->hash = l4_hash_tx(r->hash);
-}
-
-/* TC-065: removal must be consistent before quorum changes. EXPECTED RED on
- * 7d35cc8. A membership change is safe only when every authority-capable
- * participant applies the same committed configuration. The baseline has no
- * committed configuration and carries none on the wire, so (A) a participant
- * whose deployed configuration differs (cluster_size 1, the section-6
- * example of a node redefining itself as {3}) is neither detected nor
- * excluded: its ACK counts as lease evidence and its grant decides the next
- * election; (B) a participant whose configuration requires a larger quorum
- * (cluster_size 5) is likewise undetected and, after a leader loss, the two
- * live nodes cannot form any authority (both latch SAFE). Safety holds in
- * both parts by the LOT 2 rules; consistency and liveness do not. */
-static void tc_065_removal_consistency_before_quorum_change(void)
-{
-    l5_cfg_result_t a, b;
-    printf("TC-065  membership reduction must be consistently committed before it affects quorum [Lot 5]\n");
-    run_l5_config_scenario(1u, &a);
-    check(a.li >= 0, "Lot 5", "scenario A established");
-    if (a.li < 0) { return; }
-    check(a.max_valid <= 1u && a.term_regressions == 0u, "INV-RECONFIG-LOT2", "A: at most one valid authority, no term regression");
-    check(a.new_leader < 0 || l5_popcount(a.new_leader_mask) >= 2u, "INV-RECONFIG-AUTHORITY",
-          "A: no leadership was acquired with fewer than two counted votes");
-    check(a.rej_after != a.rej_before, "INV-RECONFIG-CONSISTENT",
-          "A: peers detected the participant whose deployed configuration (cluster_size 1) differs from theirs");
-    check(!a.ack_recorded, "INV-RECONFIG-CONSISTENT",
-          "A: the leader did not record the inconsistently configured node's ACK as current-term quorum evidence");
-    check(a.new_leader >= 0 && !a.mixed_config_authority, "INV-RECONFIG-TRANSITION",
-          "A: after the leader loss, authority rests only on votes from participants sharing one committed configuration");
-    printf("        A: node %d cold-restarted with cluster_size 1 while connected: peer rejections %u -> %u, ACK recorded as evidence: %s; after leader %d crashed: new leader node %d (cluster_size %u) with vote mask 0x%02X, grants by node %d: %u\n",
-           a.f + 1, a.rej_before, a.rej_after, a.ack_recorded ? "yes" : "no", a.li + 1, a.new_leader + 1,
-           a.new_leader_cs, a.new_leader_mask, a.f + 1, a.f_grants);
-
-    run_l5_config_scenario(5u, &b);
-    check(b.li >= 0, "Lot 5", "scenario B established");
-    if (b.li < 0) { return; }
-    check(b.max_valid <= 1u && b.term_regressions == 0u, "INV-RECONFIG-LOT2", "B: at most one valid authority, no term regression");
-    check(b.rej_after != b.rej_before, "INV-RECONFIG-CONSISTENT",
-          "B: peers detected the participant whose deployed configuration (cluster_size 5) differs from theirs");
-    check(b.new_leader >= 0, "INV-RECONFIG-TRANSITION",
-          "B: two live nodes under the committed three-node configuration regained a valid leader after the leader loss");
-    printf("        B: node %d cold-restarted with cluster_size 5 while connected: peer rejections %u -> %u; after leader %d crashed: valid leader %s%d; end states %s/%s/%s, cluster_size %u/%u/%u\n",
-           b.f + 1, b.rej_before, b.rej_after, b.li + 1, b.new_leader >= 0 ? "node " : "none ", b.new_leader >= 0 ? b.new_leader + 1 : 0,
-           l4_state_name(b.state_end[0]), l4_state_name(b.state_end[1]), l4_state_name(b.state_end[2]),
-           b.cs_end[0], b.cs_end[1], b.cs_end[2]);
-}
-
-/* Scenario driver shared by TC-066 and TC-070: a node is out of service for
- * 5000 ms (the intended committed removal), cold restarts, and the leader
- * is then lost so that the election that follows shows whether the
- * returned node is counted. */
-typedef struct {
-    int      li, r, s;
-    uint16_t term_rejoin;
-    bool     ack_recorded;
-    int      new_leader;
-    uint8_t  new_leader_mask;
-    uint32_t r_grants;
-    bool     r_counted;                  /* r led, or r's grant is in the new leader's mask */
-    uint32_t max_valid, term_regressions;
-    uint32_t hash;
-} l5_rejoin_result_t;
-
-static void run_l5_rejoin_scenario(l5_rejoin_result_t *r)
-{
-    traj_obs_t t;
-    uint32_t k, g0;
-    memset(r, 0, sizeof(*r));
-    r->li = r->r = r->s = r->new_leader = -1;
-    r->hash = 2166136261u;
-    bus_init();
-    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
-    r->li = leader_index();
-    if (r->li < 0) { return; }
-    r->r = (r->li + 2) % N_NODES; r->s = (r->li + 1) % N_NODES;
-    bus_crash_node(r->r);
-    for (k = 0; k < 5000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
-    bus_restart_node(r->r);                           /* ordinary cold restart, default configuration */
-    traj_init(&t);
-    for (k = 0; k < 1000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
-    r->term_rejoin = g_bus.node[r->r].term;
-    r->ack_recorded = (g_bus.node[r->li].role == MOSAIK_ROLE_LEADER) &&
-                      (g_bus.node[r->li].last_ack_term[r->r] == g_bus.node[r->li].term);
-    g0 = TX(r->r, MOSAIK_MSG_VOTE_GRANT);
-    bus_crash_node(r->li);
-    for (k = 0; k < 3000u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
-    r->r_grants = TX(r->r, MOSAIK_MSG_VOTE_GRANT) - g0;
-    r->new_leader = valid_leader_index();
-    if (r->new_leader >= 0) {
-        r->new_leader_mask = g_bus.node[r->new_leader].vote_mask;
-        r->r_counted = (r->new_leader == r->r) || ((r->new_leader_mask & (uint8_t)(1u << r->r)) != 0u);
+    for (i = 0; i < N_NODES; i++) {
+        check(l.mask_changes[i] == 1u, "INV-RECONFIG-NO-MAGIC",
+              "each node changed its committed membership exactly once, at the commit");
     }
-    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
-    r->hash = l4_hash_tx(r->hash);
+    check(l.same_epoch_mask_conflicts == 0u, "INV-RECONFIG-CONSISTENT",
+          "no two nodes held different memberships at the same epoch");
+    printf("        leader node %d removed node %d: committed 0x%02X epoch %u on all nodes; term %u unchanged; frames PROPOSE %u ACCEPT %u COMMIT %u; removed node state %s\n",
+           li + 1, rem + 1, g_bus.node[li].committed_mask, g_bus.node[li].committed_epoch,
+           g_bus.node[li].term, CFGTX(li, MOSAIK_CFG_PROPOSE), CFGTX(keep, MOSAIK_CFG_ACCEPT),
+           CFGTX(li, MOSAIK_CFG_COMMIT), l4_state_name((unsigned)g_bus.node[rem].state));
 }
 
-/* TC-066: removed-node rejoin safety. EXPECTED RED on 7d35cc8. Required
- * property: after a committed {1,2,3} -> {1,2} transition, node 3 cannot
- * cold restart and silently regain voting membership. The baseline has no
- * committed membership, so the returned node is a full voter again: its ACK
- * is lease evidence and it wins or decides the next election. Under the
- * baseline's static membership that rejoin is correct (TC-024); it is RED
- * only against the LOT 5 requirement. */
+/* TC-065: the executable form of the OLD-majority counterexample.
+ * A: a proposal that cannot reach a quorum of BOTH configurations never
+ *    commits, so the smaller quorum is never installed.
+ * B: once the new configuration is committed, evidence from the removed node
+ *    cannot renew the leader's lease. */
+static void tc_065_consistency_before_quorum_change(void)
+{
+    int li, keep, rem;
+    uint8_t target;
+    uint32_t lost_ms = 0u, cut_ms;
+    uint16_t ack_term_before;
+    mosaik_msg_t m;
+    l5_obs_t l; traj_obs_t t;
+    int k;
+
+    printf("TC-065  a membership reduction affects quorum only once both configurations have agreed [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+
+    /* A. The acceptance of the node that the NEW quorum needs cannot reach
+     *    the proposer. A quorum of the OLD configuration is still available
+     *    (the proposer plus the node being removed), which is exactly what
+     *    an old-majority-only rule would have accepted. */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+    check(l5_request(li, target, 400u, &l, &t), "Lot 5", "request accepted by the valid leader");
+    check(CFGTX(rem, MOSAIK_CFG_ACCEPT) >= 1u, "Lot 5",
+          "the node being removed did accept: an old-configuration quorum was reachable");
+    check(g_bus.node[li].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+          g_bus.node[li].committed_epoch == 1u,
+          "INV-RECONFIG-TRANSITION",
+          "the proposer did not commit on an old-configuration quorum alone");
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, 1u), "INV-RECONFIG-CONSISTENT",
+          "no node moved to the smaller membership");
+    check(observed_voters(li) == 0x07u, "INV-RECONFIG-QUORUM",
+          "quorum is still taken over the old membership while the transition is unresolved");
+    check(t.max_valid <= 1u && l.authority_outside_membership == 0u, "INV-LEADER-UNIQUE",
+          "no authority was manufactured during the unresolved transition");
+
+    /* Restore the path: the proposer retries and now reaches both quorums. */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
+    l5_run(&l, &t, 400u);
+    check(l5_all_committed(target, 2u), "INV-RECONFIG-TRANSITION",
+          "the commit happened only once a quorum of the old AND of the new membership had accepted");
+
+    /* B. Evidence from the removed node can no longer renew the lease. */
+    ack_term_before = g_bus.node[li].last_ack_term[rem];
+    make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+             g_bus.node[li].term, g_bus.node[li].seq);
+    deliver_to(li, &m);
+    check(g_bus.node[li].last_ack_term[rem] == ack_term_before, "INV-RECONFIG-REMOVED-NODE",
+          "a current-term acknowledgement from the removed node was not recorded as quorum evidence");
+
+    cut_ms = g_bus.now_ms;
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+    for (k = 0; k < 1500 && lost_ms == 0u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l);
+        /* keep feeding the leader admissible acknowledgements from the removed node */
+        make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+                 g_bus.node[li].term, g_bus.node[li].seq);
+        deliver_to(li, &m);
+        if (!mosaik_has_valid_leadership_authority(&g_bus.node[li])) { lost_ms = g_bus.now_ms - cut_ms; }
+    }
+    check(lost_ms != 0u && lost_ms <= MOSAIK_LEADERSHIP_LEASE_MS + 1u, "INV-RECONFIG-REMOVED-NODE",
+          "the leader lost authority within one lease although the removed node kept acknowledging");
+    check(g_bus.node[li].nonmember_rejections > 0u, "INV-RECONFIG-REMOVED-NODE",
+          "those acknowledgements were rejected as coming from outside the committed membership");
+    check(t.max_valid <= 1u && l.steps_multi_auth == 0u && l.same_epoch_mask_conflicts == 0u,
+          "INV-LEADER-UNIQUE", "no second authority and no incompatible configuration at any step");
+    printf("        old-quorum-only commit refused at epoch 1; commit at epoch 2 once both quorums agreed; leader %d lost authority %u ms after losing member %d, while removed node %d kept acknowledging (%u non-member rejections)\n",
+           li + 1, lost_ms, keep + 1, rem + 1, g_bus.node[li].nonmember_rejections);
+}
+
+/* TC-066: a removed node cannot regain voting membership by cold restart. */
 static void tc_066_removed_node_rejoin(void)
 {
-    l5_rejoin_result_t r;
-    printf("TC-066  removed node cannot regain voting membership by cold restart [Lot 5]\n");
-    run_l5_rejoin_scenario(&r);
-    check(r.li >= 0, "Lot 5", "scenario established");
-    if (r.li < 0) { return; }
-    check(r.max_valid <= 1u && r.term_regressions == 0u, "INV-RECONFIG-LOT2", "at most one valid authority, no term regression");
-    check(g_bus.restart_count[r.r] == 1u && r.term_rejoin >= 1u, "Lot 5", "the removed node cold-restarted from term 0 and adopted the cluster term");
-    check(!r.ack_recorded, "INV-RECONFIG-REMOVED-NODE",
-          "the leader did not record the returned node's ACK as current-term quorum evidence");
-    check(r.new_leader >= 0 && !r.r_counted, "INV-RECONFIG-REMOVED-NODE",
-          "after the leader loss the returned node neither won leadership nor cast a counted vote");
-    printf("        node %d out of service 5000 ms, cold restart, rejoined at term %u, ACK recorded as evidence: %s; after leader %d crashed: new leader node %d, vote mask 0x%02X, grants by node %d: %u\n",
-           r.r + 1, r.term_rejoin, r.ack_recorded ? "yes" : "no", r.li + 1, r.new_leader + 1, r.new_leader_mask, r.r + 1, r.r_grants);
-}
+    int li, keep, rem, new_leader;
+    uint8_t target;
+    uint32_t g0, a0, r0, ack_rx0;
+    l5_obs_t l; traj_obs_t t;
 
-/* TC-067: stale configuration replay. EXPECTED RED on 7d35cc8. Required
- * property: after configuration C1 is superseded by C2, replayed C1
- * traffic cannot restore C1. The baseline carries no configuration
- * identity: a leader's heartbeat under cluster_size 3 and under
- * cluster_size 2 is byte-identical, so a receiver cannot tell C1 traffic
- * from C2 traffic. The LOT 2B term-based replay rejection is re-verified
- * as a guard. */
-static void tc_067_stale_configuration_replay(void)
-{
-    mosaik_config_t c2;
-    mosaik_frame_t fa, fb, replay;
-    mosaik_msg_t ma, mb;
-    int la, lb, i, l2 = -1, k, v;
-    node_snap_t before[N_NODES], after[N_NODES];
-
-    printf("TC-067  stale configuration replay: configuration identity on the wire [Lot 5]\n");
+    printf("TC-066  a removed node does not regain voting membership by cold restart [Lot 5]\n");
     bus_init(); bus_run(2000u);
-    la = leader_index();
-    check(la >= 0 && g_bus.last_hb_frame_valid[la], "Lot 5", "C1 run: leader and captured heartbeat");
-    if (la < 0) { return; }
-    fa = g_bus.last_hb_frame[la];
-    mosaik_config_default(&c2); c2.cluster_size = 2u;
-    bus_init_with_cfg(&c2); bus_run(2000u);
-    lb = leader_index();
-    check(lb >= 0 && g_bus.last_hb_frame_valid[lb], "Lot 5", "C2 run: leader and captured heartbeat");
-    if (lb < 0) { return; }
-    fb = g_bus.last_hb_frame[lb];
-    check(mosaik_decode(&fa, &ma) && mosaik_decode(&fb, &mb), "Lot 5", "both captured frames decode");
-    /* RED: no configuration identity. */
-    check(memcmp(&fa, &fb, sizeof(fa)) != 0, "INV-RECONFIG-OLD-CONFIG",
-          "frames emitted under configuration C1 and configuration C2 are distinguishable on the wire");
-    printf("        leader heartbeat under cluster_size 3 (node %d, term %u, seq %u) and under cluster_size 2 (node %d, term %u, seq %u): byte-identical: %s\n",
-           la + 1, ma.term, ma.arg, lb + 1, mb.term, mb.arg, memcmp(&fa, &fb, sizeof(fa)) == 0 ? "yes" : "no");
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+    check(l5_request(li, target, 200u, &l, &t) && l5_all_committed(target, 2u), "Lot 5",
+          "membership {removed node excluded} committed at epoch 2");
 
-    /* Guard: LOT 2B term-based replay rejection still holds on the C2 run. */
-    replay = fb;
-    bus_crash_node(lb);
-    for (k = 0; k < 1500 && l2 < 0; k++) {
-        bus_step();
-        if (valid_leader_index() >= 0 && valid_leader_index() != lb) { l2 = valid_leader_index(); }
-    }
-    check(l2 >= 0 && g_bus.node[l2].term > mb.term, "REQ-FUNC-0004", "survivors re-elected at a higher term");
-    if (l2 < 0) { return; }
-    bus_run(300u);
-    for (i = 0; i < N_NODES; i++) { snap_node(&before[i], i); }
-    bus_schedule_delayed(&replay, (uint8_t)(lb + 1), 3u);
-    bus_run(4u);
-    for (i = 0; i < N_NODES; i++) { snap_node(&after[i], i); }
-    v = 1;
-    for (i = 0; i < N_NODES; i++) {
-        if (i == lb) { continue; }
-        if (after[i].stale_term != before[i].stale_term + 1u || !snap_same(&before[i], &after[i])) { v = 0; }
-    }
-    check(v != 0, "INV-NO-STALE-RECOVERY", "replayed old-term heartbeat rejected by term on every survivor, nothing restored");
+    bus_crash_node(rem);
+    l5_run(&l, &t, 1000u);
+    bus_restart_node(rem);
+    check(g_bus.node[rem].committed_mask == target && g_bus.node[rem].committed_epoch == 2u,
+          "INV-RECONFIG-REMOVED-NODE",
+          "the restarted node reloaded its own committed membership and is still excluded");
+    check(g_bus.node[rem].term == 0u && !mosaik_is_member(&g_bus.node[rem]), "Lot 5",
+          "the restart was cold: term 0, and the node is not a member");
+    g0 = TX(rem, MOSAIK_MSG_VOTE_GRANT); a0 = TX(rem, MOSAIK_MSG_ACK); r0 = TX(rem, MOSAIK_MSG_VOTE_REQ);
+    ack_rx0 = g_bus.node[li].last_ack_rx_ms[rem];
+    l5_run(&l, &t, 2000u);
+    check(TX(rem, MOSAIK_MSG_VOTE_GRANT) == g0 && TX(rem, MOSAIK_MSG_ACK) == a0 &&
+          TX(rem, MOSAIK_MSG_VOTE_REQ) == r0,
+          "INV-RECONFIG-REMOVED-NODE", "after the restart it granted no vote, acknowledged nothing and ran no election");
+    check(g_bus.node[li].last_ack_rx_ms[rem] == ack_rx0, "INV-RECONFIG-REMOVED-NODE",
+          "the leader recorded no new acknowledgement evidence from it after the removal");
+    check(valid_leader_index() == li && mosaik_has_quorum_ack_evidence(&g_bus.node[li]),
+          "INV-RECONFIG-QUORUM", "the leader's quorum rests on its remaining committed member alone");
+
+    /* The membership is now two nodes, so losing one of them leaves no
+     * quorum at all. The removed node must not be able to fill that gap. */
+    bus_crash_node(li);
+    l5_run(&l, &t, 3000u);
+    new_leader = valid_leader_index();
+    check(new_leader < 0, "INV-RECONFIG-QUORUM",
+          "with one of two committed members lost there is no quorum, so no valid authority exists");
+    check(l.leader_acq[rem] == 0u && g_bus.node[rem].role == MOSAIK_ROLE_FOLLOWER,
+          "INV-RECONFIG-REMOVED-NODE", "the removed node did not restore quorum by standing in for the lost member");
+    check(TX(rem, MOSAIK_MSG_VOTE_GRANT) == g0 && TX(rem, MOSAIK_MSG_VOTE_REQ) == r0,
+          "INV-RECONFIG-REMOVED-NODE", "it cast no vote and opened no election even when the cluster had no leader");
+    check(t.max_valid <= 1u && l.authority_outside_membership == 0u,
+          "INV-LEADER-UNIQUE", "at most one valid authority, never held outside a committed membership");
+    printf("        node %d removed at epoch 2, crashed and cold-restarted: committed 0x%02X epoch %u, term %u, member %s; after the other member was lost the cluster has %d valid leaders\n",
+           rem + 1, g_bus.node[rem].committed_mask, g_bus.node[rem].committed_epoch, g_bus.node[rem].term,
+           mosaik_is_member(&g_bus.node[rem]) ? "yes" : "no", valid_leader_count());
 }
 
-/* Scenario driver shared by TC-068 and TC-070: a follower is cut off for
- * 600 ms (below the SAFE latch boundary) while the majority continues; the
- * intended LOT 5 transition during the partition is that the majority
- * commits {majority} and the cut-off node is outside it. After the heal the
- * cut-off node returns with a higher term. */
-typedef struct {
-    int      li, f, b;
-    uint16_t term_major_at_heal, term_f_at_heal;
-    int      leader_after;
-    uint16_t term_after;
-    bool     majority_kept_authority;    /* authority stayed on the majority side at every step after the heal */
-    uint32_t max_valid, term_regressions;
-    uint32_t hash;
-} l5_partition_result_t;
-
-static void run_l5_partition_scenario(l5_partition_result_t *r)
+/* TC-067: configuration identity on the wire, and replay protection that is
+ * independent of the LOT 2B heartbeat sequence rules. */
+static void tc_067_configuration_replay(void)
 {
-    traj_obs_t t;
+    int li, keep, rem, i;
+    uint8_t target;
+    mosaik_frame_t old_propose, old_commit;
+    mosaik_msg_t m;
+    uint32_t stale0, fut0, dup0, commits0;
+    uint16_t epoch_before;
+    uint8_t mask_before;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-067  stale, duplicate and unsupported-future configuration traffic cannot move a committed membership [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+    check(l5_request(li, target, 200u, &l, &t) && l5_all_committed(target, 2u), "Lot 5",
+          "epoch 2 committed; epoch 1 is now superseded");
+    check(g_bus.last_cfg_frame_valid[li][MOSAIK_CFG_PROPOSE] && g_bus.last_cfg_frame_valid[li][MOSAIK_CFG_COMMIT],
+          "Lot 5", "the epoch-2 PROPOSE and COMMIT frames were captured from the bus");
+    old_propose = g_bus.last_cfg_frame[li][MOSAIK_CFG_PROPOSE];
+    old_commit  = g_bus.last_cfg_frame[li][MOSAIK_CFG_COMMIT];
+
+    /* Frames of different configurations are distinguishable on the wire. */
+    {
+        mosaik_msg_t a, b;
+        check(mosaik_decode(&old_propose, &a) && mosaik_decode(&old_commit, &b) &&
+              a.cfg_stage != b.cfg_stage && a.term == 2u && a.cfg_mask == target,
+              "INV-RECONFIG-OLD-CONFIG",
+              "configuration traffic carries an explicit stage, epoch and membership mask");
+    }
+
+    /* Move to epoch 3 so the captured frames become stale. */
+    check(l5_request(li, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 400u, &l, &t), "Lot 5",
+          "a second transaction re-admits the third node at epoch 3");
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, 3u), "Lot 5", "epoch 3 committed on every node");
+
+    epoch_before = g_bus.node[keep].committed_epoch;
+    mask_before  = g_bus.node[keep].committed_mask;
+    stale0 = g_bus.node[keep].config_stale_rejections;
+    fut0   = g_bus.node[keep].config_future_rejections;
+    dup0   = g_bus.node[keep].config_duplicates;
+    commits0 = g_bus.node[keep].config_commits;
+
+    /* Replay of the superseded epoch-2 PROPOSE and COMMIT. */
+    bus_inject_frame(&old_propose, (uint8_t)(li + 1)); bus_step();
+    bus_inject_frame(&old_commit,  (uint8_t)(li + 1)); bus_step();
+    check(g_bus.node[keep].config_stale_rejections >= stale0 + 2u, "INV-RECONFIG-OLD-CONFIG",
+          "both replayed epoch-2 frames were rejected as a superseded configuration");
+    check(g_bus.node[keep].committed_epoch == epoch_before &&
+          g_bus.node[keep].committed_mask == mask_before &&
+          g_bus.node[keep].config_commits == commits0,
+          "INV-RECONFIG-OLD-CONFIG", "the replay restored nothing");
+
+    /* Unsupported future epoch, with no transition context. */
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_COMMIT, 9u, target, 0u);
+    deliver_to(keep, &m);
+    check(g_bus.node[keep].config_future_rejections >= fut0 + 1u &&
+          g_bus.node[keep].committed_epoch == epoch_before,
+          "INV-RECONFIG-OLD-CONFIG", "a jump to a future epoch without transition context committed nothing");
+
+    /* Duplicate current-epoch COMMIT is idempotent. */
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_COMMIT, epoch_before, mask_before, 0u);
+    deliver_to(keep, &m); deliver_to(keep, &m);
+    check(g_bus.node[keep].config_duplicates >= dup0 + 2u &&
+          g_bus.node[keep].committed_epoch == epoch_before &&
+          g_bus.node[keep].config_commits == commits0,
+          "INV-RECONFIG-OLD-CONFIG", "duplicate current-epoch commits are idempotent");
+
+    /* Delayed configuration traffic through the network model. */
+    bus_schedule_delayed(&old_commit, (uint8_t)(li + 1), 5u);
+    l5_run(&l, &t, 20u);
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, 3u), "INV-RECONFIG-OLD-CONFIG",
+          "a delayed superseded commit delivered later changed nothing");
+    for (i = 0; i < N_NODES; i++) { check(g_bus.node[i].term == g_bus.node[li].term, "INV-TERM-MONOTONIC",
+          "no configuration frame changed any leadership term"); }
+    check(t.max_valid <= 1u && l.same_epoch_mask_conflicts == 0u, "INV-LEADER-UNIQUE",
+          "authority and configuration stayed consistent throughout");
+    printf("        node %d at epoch %u mask 0x%02X: stale rejections %u, future rejections %u, duplicates %u, commits %u (unchanged)\n",
+           keep + 1, g_bus.node[keep].committed_epoch, g_bus.node[keep].committed_mask,
+           g_bus.node[keep].config_stale_rejections, g_bus.node[keep].config_future_rejections,
+           g_bus.node[keep].config_duplicates, g_bus.node[keep].config_commits);
+}
+
+/* Scenario driver shared by TC-068 and TC-070: the proposer commits, then the
+ * network cuts it off before the COMMIT can be delivered, so one side holds
+ * the new configuration and the other two hold the old one with a pending
+ * acceptance. Read-only observation; nothing is written into a node. */
+typedef struct {
+    int      li, keep, rem;
+    uint8_t  target;
+    bool     committed_proposer;
+    uint16_t epoch_after_cut[N_NODES];
+    uint8_t  mask_after_cut[N_NODES];
+    bool     promise_after_cut[N_NODES];
+    uint32_t max_valid, steps_multi_auth, conflicts, auth_outside;
+    uint32_t valid_steps_isolated_side;
+    bool     converged;
+    uint16_t epoch_end;
+    uint8_t  mask_end;
+    uint32_t hash;
+} l5_partial_t;
+
+static void run_l5_partial_commit(l5_partial_t *r)
+{
+    l5_obs_t l; traj_obs_t t;
     uint32_t k;
+    int i;
+
     memset(r, 0, sizeof(*r));
-    r->li = r->f = r->b = r->leader_after = -1;
-    r->majority_kept_authority = true;
+    r->li = r->keep = r->rem = -1;
     r->hash = 2166136261u;
     bus_init();
     for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
     r->li = leader_index();
     if (r->li < 0) { return; }
-    survivors_of(r->li, &r->f, &r->b);
-    isolate_node(r->f, true);
-    traj_init(&t);
-    for (k = 0; k < 600u; k++) { bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash); }
-    r->term_major_at_heal = g_bus.node[r->li].term; r->term_f_at_heal = g_bus.node[r->f].term;
-    isolate_node(r->f, false);
-    for (k = 0; k < 2000u; k++) {
-        int v;
-        bus_step(); traj_step(&t); r->hash = l4_hash_step(r->hash);
-        v = valid_leader_index();
-        if (v >= 0 && v == r->f) { r->majority_kept_authority = false; }
+    survivors_of(r->li, &r->keep, &r->rem);
+    r->target = (uint8_t)(l5_bit(r->li) | l5_bit(r->keep));
+    l5_init(&l); traj_init(&t);
+
+    if (!mosaik_request_reconfiguration(&g_bus.node[r->li], r->target)) { return; }
+    /* Run until the proposer has committed, then cut it off in both
+     * directions so the COMMIT frame it queued is never delivered. */
+    for (k = 0; k < 500u && g_bus.node[r->li].committed_epoch == 1u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
     }
-    r->leader_after = valid_leader_index();
-    r->term_after = r->leader_after >= 0 ? g_bus.node[r->leader_after].term : 0u;
-    r->max_valid = t.max_valid; r->term_regressions = t.term_regressions;
+    r->committed_proposer = (g_bus.node[r->li].committed_epoch == 2u);
+    /* Cut the proposer off for 600 ms: long enough that the commit it
+     * queued is never delivered and its lease lapses, short enough not to
+     * exhaust its elections, which would latch SAFE for FDIR reasons that
+     * have nothing to do with the transaction (Lot 3, TC-042). */
+    isolate_node(r->li, true);
+    for (k = 0; k < 600u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+        if (valid_leader_index() == r->keep || valid_leader_index() == r->rem) {
+            r->valid_steps_isolated_side++;
+        }
+        if (k == 0u) {
+            for (i = 0; i < N_NODES; i++) {
+                r->epoch_after_cut[i] = g_bus.node[i].committed_epoch;
+                r->mask_after_cut[i]  = g_bus.node[i].committed_mask;
+                r->promise_after_cut[i] = (g_bus.node[i].accepted_epoch ==
+                                           (uint16_t)(g_bus.node[i].committed_epoch + 1u));
+            }
+        }
+    }
+    /* Heal: the configuration announcement repairs the lost COMMIT. */
+    isolate_node(r->li, false);
+    for (k = 0; k < 4000u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+    }
+    r->converged  = l5_all_committed(r->target, 2u);
+    r->epoch_end  = g_bus.node[r->keep].committed_epoch;
+    r->mask_end   = g_bus.node[r->keep].committed_mask;
+    r->max_valid  = l.max_valid;
+    r->steps_multi_auth = l.steps_multi_auth;
+    r->conflicts  = l.same_epoch_mask_conflicts;
+    r->auth_outside = l.authority_outside_membership;
     r->hash = l4_hash_tx(r->hash);
 }
 
-/* TC-068: partition during reconfiguration. EXPECTED RED on 7d35cc8.
- * Required property: if communication is interrupted during a membership
- * transition, the two sides cannot emerge with incompatible authoritative
- * memberships. The baseline cannot express the transition at all, so the
- * cut-off node returns with a higher term and takes authority from the
- * majority that was meant to have committed without it. That takeover is
- * LOT 2-correct under static membership; it is RED against LOT 5. */
-static void tc_068_partition_during_reconfiguration(void)
+/* TC-068: a partition between agreement and commit must not let the two sides
+ * emerge with incompatible authoritative memberships. */
+static void tc_068_partition_during_transition(void)
 {
-    l5_partition_result_t r;
-    printf("TC-068  partition during an intended membership transition: sides must not emerge with incompatible authority [Lot 5]\n");
-    run_l5_partition_scenario(&r);
-    check(r.li >= 0, "Lot 5", "scenario established");
+    l5_partial_t r;
+    printf("TC-068  partition during a membership transition: no incompatible authority, convergence on heal [Lot 5]\n");
+    run_l5_partial_commit(&r);
+    check(r.li >= 0 && r.committed_proposer, "Lot 5",
+          "scenario established: the proposer committed the new membership before being cut off");
     if (r.li < 0) { return; }
-    check(r.max_valid <= 1u && r.term_regressions == 0u, "INV-RECONFIG-LOT2", "at most one valid authority at any step, no term regression");
-    check(r.term_f_at_heal > r.term_major_at_heal, "Lot 5", "the cut-off node advanced its term during the partition (it started elections)");
-    check(r.majority_kept_authority && r.leader_after >= 0 && r.leader_after != r.f, "INV-RECONFIG-TRANSITION",
-          "after the heal, authority stayed with the side that continued under the committed configuration; the cut-off node did not take it");
-    printf("        leader node %d term %u; node %d cut off 600 ms (term %u at heal); after the heal valid leader node %d term %u; majority kept authority: %s\n",
-           r.li + 1, r.term_major_at_heal, r.f + 1, r.term_f_at_heal, r.leader_after + 1, r.term_after,
-           r.majority_kept_authority ? "yes" : "no");
+    check(r.epoch_after_cut[r.li] == 2u && r.mask_after_cut[r.li] == r.target,
+          "Lot 5", "the isolated proposer holds the new configuration");
+    check(r.epoch_after_cut[r.keep] == 1u && r.epoch_after_cut[r.rem] == 1u,
+          "Lot 5", "the other two never received the commit and hold the old configuration");
+    check(r.promise_after_cut[r.keep] && r.promise_after_cut[r.rem],
+          "INV-RECONFIG-TRANSITION", "both of them are bound by their acceptance of the successor");
+    check(r.valid_steps_isolated_side == 0u, "INV-RECONFIG-TRANSITION",
+          "the two nodes that accepted but did not commit never formed an authority of their own");
+    check(r.max_valid <= 1u && r.steps_multi_auth == 0u, "INV-LEADER-UNIQUE",
+          "at most one valid authority at every observed step");
+    check(r.conflicts == 0u, "INV-RECONFIG-CONSISTENT",
+          "no two nodes held different memberships at the same configuration epoch");
+    check(r.auth_outside == 0u, "INV-RECONFIG-AUTHORITY",
+          "no node held authority outside its own committed membership");
+    check(r.converged && r.epoch_end == 2u && r.mask_end == r.target, "INV-RECONFIG-CONSISTENT",
+          "after the heal the configuration announcement repaired the lost commit on every node");
+    printf("        proposer node %d committed 0x%02X epoch 2 then was cut off; the other two stayed at epoch 1 with a pending acceptance and held authority for %u steps; after the heal every node is at 0x%02X epoch %u\n",
+           r.li + 1, r.target, r.valid_steps_isolated_side, r.mask_end, r.epoch_end);
 }
 
-/* TC-069: authority and lease non-regression under reconfiguration-related
- * conditions. Guard, expected PASS: permanent node loss, delayed pre-loss
- * traffic, reordered traffic, a short leader partition, cold restart and a
- * split-brain SAFE, with at most one valid authority throughout and the
- * LOT 2 lease rules intact. */
+/* TC-069: LOT 2 authority and lease semantics are unchanged by LOT 5. */
 static void tc_069_authority_lease_non_regression(void)
 {
-    int li, r, s, k, l2;
+    int li, keep, rem, k, l2;
     uint32_t cut_ms, lost_ms = 0u, ren0;
     mosaik_frame_t old_hb;
     l5_obs_t l; traj_obs_t t;
 
-    printf("TC-069  authority and lease non-regression under node loss, replay, reorder, partition, restart and SAFE [Lot 5]\n");
+    printf("TC-069  authority and lease non-regression with membership traffic present [Lot 5]\n");
     bus_init(); bus_run(2000u);
     li = leader_index();
     check(li >= 0 && g_bus.last_hb_frame_valid[li], "Lot 5", "leader existed");
     if (li < 0) { return; }
-    r = (li + 2) % N_NODES; s = (li + 1) % N_NODES;
+    survivors_of(li, &keep, &rem);
     old_hb = g_bus.last_hb_frame[li];
     l5_init(&l); traj_init(&t);
-    /* permanent loss of one node with its last frames still in flight */
+
+    /* node loss with its last frames still in flight, then reordering */
     bus_schedule_delayed(&old_hb, (uint8_t)(li + 1), 1500u);
-    bus_crash_node(r);
+    bus_crash_node(rem);
     l5_run(&l, &t, 3000u);
-    /* reordered traffic on one path for 500 ms */
-    bus_set_net_action((uint8_t)s, (uint8_t)li, NET_REORDER, 0u);
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_REORDER, 0u);
     l5_run(&l, &t, 500u);
-    bus_set_net_action((uint8_t)s, (uint8_t)li, NET_DELIVER, 0u);
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
     l5_run(&l, &t, 500u);
-    /* one-way loss of inbound traffic to the leader: authority must lapse within the lease */
+
+    /* a leader that receives no acknowledgement loses authority within a lease */
     li = leader_index();
     if (li >= 0) {
         cut_ms = g_bus.now_ms;
@@ -4970,43 +5054,715 @@ static void tc_069_authority_lease_non_regression(void)
             if (!mosaik_has_valid_leadership_authority(&g_bus.node[li])) { lost_ms = g_bus.now_ms - cut_ms; }
         }
         check(lost_ms != 0u && lost_ms <= MOSAIK_LEADERSHIP_LEASE_MS + 1u, "INV-RECONFIG-LOT2",
-              "a leader that receives no acknowledgement loses authority within one lease");
+              "a leader without received acknowledgements loses authority within one lease");
         bus_set_full_connectivity();
     }
     l5_run(&l, &t, 1500u);
-    /* cold restart of the lost node and a split-brain SAFE on the current leader */
-    bus_restart_node(r);
+    bus_restart_node(rem);
     l5_run(&l, &t, 1500u);
     ren0 = g_bus.lease_renewals;
     l2 = split_brain_leader();
     l5_run(&l, &t, 2000u);
-    check(l2 >= 0, "REQ-SAFE-0003", "split-brain injection latched SAFE");
-    check(t.max_valid <= 1u, "INV-LEADER-UNIQUE", "max concurrent valid authorities <= 1 throughout");
-    check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression (cold restart excluded)");
-    check(t.safe_auth_violations == 0u && t.safe_role_violations == 0u, "INV-RECONFIG-LOT3", "SAFE node never held authority or a non-follower role");
-    check(l.cs_changes == 0u && l5_min_grants_any(&l) >= 2u, "INV-RECONFIG-QUORUM", "cluster_size constant; every leadership acquisition counted at least 2 votes");
-    check(g_bus.lease_renewals == g_bus.quorum_contact_events, "INV-RECONFIG-LOT2", "every lease renewal coincided with an accepted peer acknowledgement");
-    printf("        authority lost %u ms after inbound loss (lease %u ms); lease renewals after SAFE %u; max valid %u; leadership acquisitions n1=%u n2=%u n3=%u\n",
-           lost_ms, (unsigned)MOSAIK_LEADERSHIP_LEASE_MS, g_bus.lease_renewals - ren0, t.max_valid,
-           l.leader_acq[0], l.leader_acq[1], l.leader_acq[2]);
+
+    check(l2 >= 0, "REQ-SAFE-0003", "split-brain injection still latches SAFE");
+    check(t.max_valid <= 1u && l.steps_multi_auth == 0u, "INV-LEADER-UNIQUE",
+          "max concurrent valid authorities <= 1 throughout");
+    check(t.term_regressions == 0u && l.term_regressions == 0u, "INV-TERM-MONOTONIC", "no term regression");
+    check(t.safe_auth_violations == 0u && t.safe_role_violations == 0u, "INV-RECONFIG-LOT3",
+          "a SAFE node held neither authority nor a non-follower role");
+    check(l5_min_votes_any(&l) >= 2u, "INV-RECONFIG-QUORUM",
+          "every leadership acquisition counted a quorum of the committed membership");
+    check(g_bus.lease_renewals == g_bus.quorum_contact_events, "INV-RECONFIG-LOT2",
+          "every lease renewal coincided with an accepted peer acknowledgement");
+    check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, 1u), "INV-RECONFIG-NO-MAGIC",
+          "none of these faults changed the committed membership");
+    printf("        authority lost %u ms after losing inbound traffic (lease %u ms); lease renewals after SAFE %u; committed membership 0x%02X epoch %u unchanged\n",
+           lost_ms, (unsigned)MOSAIK_LEADERSHIP_LEASE_MS, g_bus.lease_renewals - ren0,
+           g_bus.node[li >= 0 ? li : 0].committed_mask, g_bus.node[li >= 0 ? li : 0].committed_epoch);
 }
 
-/* TC-070: determinism of the LOT 5 RED scenarios, run A against run B,
- * independent of whether the LOT 5 properties hold. */
-static void tc_070_determinism_of_lot5_scenarios(void)
+/* Scenario driver shared by TC-074 and TC-070: the proposer fails in the
+ * middle of a transaction, either before any acceptance reached it or after
+ * it had already committed, and later returns. */
+typedef struct {
+    int      li, keep, rem;
+    uint8_t  target;
+    int      variant;
+    bool     committed_before_crash;
+    bool     promise_survivors;
+    bool     committed_partner, committed_third;
+    uint32_t committed_during_outage;
+    uint32_t valid_steps_during_outage;
+    bool     recovered;
+    uint16_t epoch_end;
+    uint8_t  mask_end;
+    uint32_t max_valid, steps_multi_auth, conflicts, auth_outside;
+    uint8_t  max_failed[N_NODES];
+    uint32_t safe_nodes;
+    uint32_t hash;
+} l5_crash_t;
+
+/* variant 0: no acceptance ever reaches the proposer, which then fails.
+ * variant 1: the proposer commits, is cut off so the commit is lost, fails.
+ * variant 2: the commit reaches one participant only, then the proposer fails.
+ * In every variant the proposer is out of service for outage_ms and then
+ * returns; the outage stays below the election-exhaustion budget so that any
+ * loss of authority is the transaction's doing and not a Lot 3 SAFE latch. */
+static void run_l5_proposer_crash(int variant, uint32_t outage_ms, l5_crash_t *r)
 {
-    l5_cfg_result_t a1, b1;
-    l5_rejoin_result_t a2, b2;
-    l5_partition_result_t a3, b3;
-    printf("TC-070  determinism of the TC-065, TC-066 and TC-068 scenarios (run A vs run B) [Lot 5]\n");
-    run_l5_config_scenario(1u, &a1); run_l5_config_scenario(1u, &b1);
-    run_l5_rejoin_scenario(&a2);      run_l5_rejoin_scenario(&b2);
-    run_l5_partition_scenario(&a3);   run_l5_partition_scenario(&b3);
-    check(a1.hash == b1.hash && memcmp(&a1, &b1, sizeof(a1)) == 0, "Lot 5", "TC-065 scenario A reproduced exactly");
-    check(a2.hash == b2.hash && memcmp(&a2, &b2, sizeof(a2)) == 0, "Lot 5", "TC-066 scenario reproduced exactly");
-    check(a3.hash == b3.hash && memcmp(&a3, &b3, sizeof(a3)) == 0, "Lot 5", "TC-068 scenario reproduced exactly");
+    l5_obs_t l; traj_obs_t t;
+    uint32_t k;
+    int i;
+
+    memset(r, 0, sizeof(*r));
+    r->li = r->keep = r->rem = -1;
+    r->variant = variant;
+    r->hash = 2166136261u;
+    bus_init();
+    for (k = 0; k < 2000u; k++) { bus_step(); r->hash = l4_hash_step(r->hash); }
+    r->li = leader_index();
+    if (r->li < 0) { return; }
+    survivors_of(r->li, &r->keep, &r->rem);
+    r->target = (uint8_t)(l5_bit(r->li) | l5_bit(r->keep));
+    l5_init(&l); traj_init(&t);
+
+    if (variant == 0) {
+        bus_set_net_action((uint8_t)r->keep, (uint8_t)r->li, NET_DROP, 0u);
+        bus_set_net_action((uint8_t)r->rem,  (uint8_t)r->li, NET_DROP, 0u);
+    } else if (variant == 2) {
+        bus_set_net_action((uint8_t)r->li, (uint8_t)r->rem, NET_DROP, 0u);
+    }
+    if (!mosaik_request_reconfiguration(&g_bus.node[r->li], r->target)) { return; }
+    for (k = 0; k < 500u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+        if (variant != 0 && g_bus.node[r->li].committed_epoch == 2u) { break; }
+        if (variant == 0 && k >= 20u) { break; }
+    }
+    r->committed_before_crash = (g_bus.node[r->li].committed_epoch == 2u);
+    if (variant == 1) {
+        /* cut the proposer off so the commit frame it queued is dropped */
+        isolate_node(r->li, true);
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+    } else if (variant == 2) {
+        /* let the commit reach the one reachable participant */
+        for (k = 0; k < 3u; k++) { bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash); }
+    }
+    r->promise_survivors = (g_bus.node[r->keep].accepted_epoch == 2u) &&
+                           (g_bus.node[r->rem].accepted_epoch == 2u);
+    r->committed_partner = (g_bus.node[r->keep].committed_epoch == 2u);
+    r->committed_third   = (g_bus.node[r->rem].committed_epoch == 2u);
+    bus_crash_node(r->li);
+    bus_set_full_connectivity();
+    for (k = 0; k < outage_ms; k++) {
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+        if (valid_leader_count() > 0) { r->valid_steps_during_outage++; }
+    }
+    for (i = 0; i < N_NODES; i++) {
+        if (i == r->li) { continue; }
+        if (g_bus.node[i].committed_epoch == 2u) { r->committed_during_outage++; }
+    }
+    bus_restart_node(r->li);
+    for (k = 0; k < 6000u; k++) {
+        int v;
+        bus_step(); traj_step(&t); l5_step(&l); r->hash = l4_hash_step(r->hash);
+        /* the external request is re-issued on whichever node holds valid
+         * authority, exactly as an operator would repeat an order that was
+         * interrupted; it commits nothing by itself */
+        v = valid_leader_index();
+        if (v >= 0 && g_bus.node[v].committed_mask != r->target) {
+            (void)mosaik_request_reconfiguration(&g_bus.node[v], r->target);
+        }
+    }
+    r->recovered = l5_all_committed(r->target, 2u);
+    for (i = 0; i < N_NODES; i++) {
+        r->max_failed[i] = t.max_failed[i];
+        if (g_bus.node[i].state == MOSAIK_STATE_SAFE) { r->safe_nodes++; }
+    }
+    r->epoch_end = g_bus.node[r->keep].committed_epoch;
+    r->mask_end  = g_bus.node[r->keep].committed_mask;
+    r->max_valid = l.max_valid;
+    r->steps_multi_auth = l.steps_multi_auth;
+    r->conflicts = l.same_epoch_mask_conflicts;
+    r->auth_outside = l.authority_outside_membership;
+    r->hash = l4_hash_tx(r->hash);
+}
+
+/* TC-070: determinism of the LOT 5 transaction scenarios, run A against run B. */
+static void tc_070_determinism_of_reconfiguration(void)
+{
+    l5_partial_t a1, b1;
+    l5_crash_t a2, b2, a3, b3;
+    printf("TC-070  determinism of the reconfiguration scenarios (run A vs run B) [Lot 5]\n");
+    run_l5_partial_commit(&a1);   run_l5_partial_commit(&b1);
+    run_l5_proposer_crash(0, 400u, &a2); run_l5_proposer_crash(0, 400u, &b2);
+    run_l5_proposer_crash(1, 400u, &a3); run_l5_proposer_crash(1, 400u, &b3);
+    check(a1.hash == b1.hash && memcmp(&a1, &b1, sizeof(a1)) == 0, "Lot 5",
+          "partial-commit scenario reproduced exactly");
+    check(a2.hash == b2.hash && memcmp(&a2, &b2, sizeof(a2)) == 0, "Lot 5",
+          "proposer-crash-before-quorum scenario reproduced exactly");
+    check(a3.hash == b3.hash && memcmp(&a3, &b3, sizeof(a3)) == 0, "Lot 5",
+          "proposer-crash-after-commit scenario reproduced exactly");
     printf("        hashes 0x%08X 0x%08X 0x%08X reproduced: %s %s %s\n", a1.hash, a2.hash, a3.hash,
-           a1.hash == b1.hash ? "yes" : "no", a2.hash == b2.hash ? "yes" : "no", a3.hash == b3.hash ? "yes" : "no");
+           a1.hash == b1.hash ? "yes" : "no", a2.hash == b2.hash ? "yes" : "no",
+           a3.hash == b3.hash ? "yes" : "no");
+}
+
+/* TC-071: two different successors of the same committed configuration can
+ * never both be agreed. */
+static void tc_071_conflicting_successors(void)
+{
+    int li, keep, rem;
+    uint8_t mask_a, mask_b;
+    uint32_t conf0;
+    uint16_t bound_epoch;
+    uint8_t  bound_mask;
+    mosaik_msg_t m;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-071  conflicting successors of one configuration cannot both be agreed [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    mask_a = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    mask_b = (uint8_t)(l5_bit(li) | l5_bit(rem));
+    l5_init(&l); traj_init(&t);
+
+    /* The leader proposes A; every member binds to A for epoch 2. */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);   /* keep the transaction open */
+    check(mosaik_request_reconfiguration(&g_bus.node[li], mask_a), "Lot 5", "first proposal accepted");
+    l5_run(&l, &t, 150u);
+    bound_epoch = g_bus.node[keep].accepted_epoch;
+    bound_mask  = g_bus.node[keep].accepted_mask;
+    check(bound_epoch == 2u && bound_mask == mask_a, "INV-RECONFIG-TRANSITION",
+          "the acceptor bound itself to exactly one successor for epoch 2");
+
+    /* A conflicting successor B for the same epoch, from the same leader. */
+    conf0 = g_bus.node[keep].config_conflict_rejections;
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, 2u, mask_b, 0u);
+    deliver_to(keep, &m);
+    deliver_to(rem, &m);
+    check(g_bus.node[keep].config_conflict_rejections >= conf0 + 1u, "INV-RECONFIG-CONSISTENT",
+          "a second, different successor for the same epoch was refused");
+    check(g_bus.node[keep].accepted_epoch == bound_epoch && g_bus.node[keep].accepted_mask == bound_mask,
+          "INV-RECONFIG-CONSISTENT", "the existing binding was not overwritten");
+    check(g_bus.node[rem].accepted_mask == mask_a, "INV-RECONFIG-CONSISTENT",
+          "the other acceptor also kept its original binding");
+
+    /* The request API refuses a conflicting target on a node already bound. */
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], mask_b), "INV-RECONFIG-CONSISTENT",
+          "the leader refuses to propose a successor conflicting with its own binding");
+
+    /* Only the originally agreed successor can ever commit. */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
+    l5_run(&l, &t, 400u);
+    check(l5_all_committed(mask_a, 2u), "INV-RECONFIG-CONSISTENT",
+          "the configuration committed at epoch 2 is the one that was agreed, on every node");
+    check(l.same_epoch_mask_conflicts == 0u && t.max_valid <= 1u, "INV-LEADER-UNIQUE",
+          "no incompatible configuration and no second authority at any step");
+    printf("        epoch 2 bound to 0x%02X; conflicting 0x%02X refused (%u conflict rejections); committed 0x%02X on every node\n",
+           mask_a, mask_b, g_bus.node[keep].config_conflict_rejections, g_bus.node[keep].committed_mask);
+}
+
+/* TC-072: every stage of the transaction is idempotent under duplication and
+ * insensitive to ordering. */
+static void tc_072_transaction_idempotence(void)
+{
+    int li, keep, rem;
+    uint8_t target;
+    uint32_t dup0, commits0, acc0;
+    uint16_t bound;
+    mosaik_msg_t m;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-072  duplicate and reordered transaction frames are idempotent [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+
+    /* duplicate PROPOSE: same successor, acceptance repeated, binding unchanged */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+    check(mosaik_request_reconfiguration(&g_bus.node[li], target), "Lot 5", "proposal issued");
+    l5_run(&l, &t, 150u);
+    bound = g_bus.node[keep].accepted_epoch;
+    dup0 = g_bus.node[keep].config_duplicates;
+    acc0 = CFGTX(keep, MOSAIK_CFG_ACCEPT);
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, 2u, target, 0u);
+    deliver_to(keep, &m); deliver_to(keep, &m);
+    check(g_bus.node[keep].config_duplicates >= dup0 + 2u && g_bus.node[keep].accepted_epoch == bound,
+          "Lot 5", "a repeated proposal re-acknowledges without changing the binding");
+    check(CFGTX(keep, MOSAIK_CFG_ACCEPT) == acc0 + 2u, "Lot 5",
+          "each repeated proposal produced exactly one acceptance");
+
+    /* duplicate ACCEPT at the proposer: no double commit */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
+    l5_run(&l, &t, 400u);
+    check(l5_all_committed(target, 2u), "Lot 5", "epoch 2 committed");
+    commits0 = g_bus.node[li].config_commits;
+    make_cfg_msg(&m, (uint8_t)(keep + 1), MOSAIK_CFG_ACCEPT, 2u, target, (uint8_t)(li + 1));
+    deliver_to(li, &m); deliver_to(li, &m);
+    check(g_bus.node[li].config_commits == commits0, "Lot 5",
+          "acceptances replayed after the commit do not commit anything again");
+
+    /* reordering: a commit for the next epoch arriving before its proposal */
+    {
+        uint16_t e_next = 3u;
+        uint32_t stale0 = g_bus.node[keep].config_stale_rejections;
+        make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_COMMIT, e_next, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 0u);
+        deliver_to(keep, &m);
+        check(g_bus.node[keep].committed_epoch == e_next &&
+              g_bus.node[keep].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL,
+              "Lot 5", "a commit from a member for the next epoch is applied on its own");
+        make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, e_next, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 0u);
+        deliver_to(keep, &m);
+        check(g_bus.node[keep].config_stale_rejections >= stale0 + 1u &&
+              g_bus.node[keep].committed_epoch == e_next,
+              "INV-RECONFIG-OLD-CONFIG", "the proposal arriving afterwards is refused as superseded");
+    }
+    check(t.max_valid <= 1u && l.authority_outside_membership == 0u, "INV-LEADER-UNIQUE",
+          "no authority was manufactured by duplicated or reordered transaction traffic");
+    printf("        duplicates counted %u, acceptances emitted %u, commits at the proposer %u (unchanged by replay)\n",
+           g_bus.node[keep].config_duplicates, CFGTX(keep, MOSAIK_CFG_ACCEPT) - acc0, g_bus.node[li].config_commits);
+}
+
+/* TC-073: malformed, empty and otherwise inadmissible memberships. */
+static void tc_073_malformed_membership(void)
+{
+    int li, keep, rem, i;
+    mosaik_msg_t m;
+    mosaik_frame_t f;
+    uint32_t mism0, de0;
+    uint16_t epoch_before;
+    uint8_t mask_before;
+
+    printf("TC-073  malformed, empty and single-node memberships are refused [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+
+    /* decoder: empty mask, mask outside the three nodes, invalid stages */
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, 2u, 0x03u, 0u);
+    mosaik_encode(&f, &m);
+    f.data[3] = 0x00u; f.data[7] = mosaik_crc8(f.data, 7u);
+    check(!mosaik_decode(&f, &m), "INV-RECONFIG-NO-MAGIC", "an empty membership mask does not decode");
+    mosaik_encode(&f, &m); f.data[3] = 0x0Bu; f.data[7] = mosaik_crc8(f.data, 7u);
+    check(!mosaik_decode(&f, &m), "INV-RECONFIG-NO-MAGIC", "a mask naming a node outside the cluster does not decode");
+    mosaik_encode(&f, &m); f.data[2] = 0x00u; f.data[7] = mosaik_crc8(f.data, 7u);
+    check(!mosaik_decode(&f, &m), "INV-RECONFIG-NO-MAGIC", "stage 0 does not decode");
+    mosaik_encode(&f, &m); f.data[2] = 0x05u; f.data[7] = mosaik_crc8(f.data, 7u);
+    check(!mosaik_decode(&f, &m), "INV-RECONFIG-NO-MAGIC", "an unknown stage does not decode");
+
+    /* such a frame delivered through the bus is counted and has no effect */
+    epoch_before = g_bus.node[keep].committed_epoch; mask_before = g_bus.node[keep].committed_mask;
+    de0 = g_bus.node[keep].decode_errors;
+    mosaik_encode(&f, &m); f.data[3] = 0x00u; f.data[7] = mosaik_crc8(f.data, 7u);
+    bus_inject_frame(&f, (uint8_t)(li + 1)); bus_step();
+    check(g_bus.node[keep].decode_errors > de0 && g_bus.node[keep].committed_epoch == epoch_before &&
+          g_bus.node[keep].committed_mask == mask_before,
+          "INV-RECONFIG-NO-MAGIC", "the rejected frame was counted as a decode error and changed nothing");
+
+    /* a well-formed frame proposing a single-node membership is refused by the handler */
+    mism0 = g_bus.node[keep].config_mismatch_observed;
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, 2u, l5_bit(li), 0u);
+    deliver_to(keep, &m);
+    check(g_bus.node[keep].config_mismatch_observed >= mism0 + 1u &&
+          g_bus.node[keep].accepted_epoch != 2u,
+          "INV-RECONFIG-PARTITION", "a single-node membership is never accepted");
+    /* and one that excludes its own proposer */
+    mism0 = g_bus.node[keep].config_mismatch_observed;
+    make_cfg_msg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, 2u, (uint8_t)(l5_bit(keep) | l5_bit(rem)), 0u);
+    deliver_to(keep, &m);
+    check(g_bus.node[keep].config_mismatch_observed >= mism0 + 1u &&
+          g_bus.node[keep].accepted_epoch != 2u,
+          "INV-RECONFIG-CONSISTENT", "a membership that excludes its own proposer is never accepted");
+
+    /* the public request API applies the same rules */
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], 0x00u), "INV-RECONFIG-NO-MAGIC", "empty target refused");
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], 0x0Fu), "INV-RECONFIG-NO-MAGIC", "out-of-range target refused");
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], l5_bit(li)), "INV-RECONFIG-PARTITION",
+          "a single-node target refused: no configuration may reduce quorum to one");
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], (uint8_t)(l5_bit(keep) | l5_bit(rem))),
+          "INV-RECONFIG-CONSISTENT", "a target excluding the requester refused");
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], (uint8_t)MOSAIK_MEMBERSHIP_ALL),
+          "Lot 5", "a target identical to the committed membership refused");
+    check(!mosaik_request_reconfiguration(&g_bus.node[keep], (uint8_t)(l5_bit(keep) | l5_bit(li))),
+          "INV-RECONFIG-AUTHORITY", "a node without valid leadership authority cannot propose");
+    for (i = 0; i < N_NODES; i++) {
+        check(g_bus.node[i].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+              g_bus.node[i].committed_epoch == 1u,
+              "INV-RECONFIG-NO-MAGIC", "none of the refused requests changed any committed membership");
+    }
+    /* configuration epochs never wrap: the last representable one refuses a
+     * successor rather than rolling round to zero */
+    {
+        mosaik_config_store_t last;
+        last.committed_epoch = 0xFFFFu; last.committed_mask = (uint8_t)MOSAIK_MEMBERSHIP_ALL;
+        last.accepted_epoch = 0u; last.accepted_mask = 0u;
+        bus_crash_node(rem);
+        bus_run(50u);
+        bus_restart_node_with_store(rem, &last);
+        check(g_bus.node[rem].committed_epoch == 0xFFFFu, "Lot 5", "the last representable epoch loads from the store");
+        check(!mosaik_request_reconfiguration(&g_bus.node[rem], (uint8_t)(l5_bit(rem) | l5_bit(li))),
+              "INV-RECONFIG-OLD-CONFIG", "no transaction is started that would wrap the configuration epoch");
+    }
+    printf("        decoder refused 4 malformed frames; handler refused a single-node and a proposer-excluding membership; API refused 6 inadmissible requests and an epoch that would wrap\n");
+}
+
+/* TC-074: the proposer fails in the middle of the transaction, including
+ * when the commit reached nobody or only one participant. */
+static void tc_074_proposer_failure(void)
+{
+    l5_crash_t a, b, c, d;
+
+    printf("TC-074  proposer failure before agreement, after an undelivered commit, and after a partial commit [Lot 5]\n");
+
+    run_l5_proposer_crash(0, 400u, &a);
+    check(a.li >= 0 && !a.committed_before_crash && a.promise_survivors, "Lot 5",
+          "A: no acceptance reached the proposer before it failed, yet both peers had bound themselves");
+    check(a.committed_during_outage == 0u, "INV-RECONFIG-TRANSITION",
+          "A: no node installed the new membership while the proposer was out of service");
+    check(a.valid_steps_during_outage == 0u, "INV-RECONFIG-TRANSITION",
+          "A: the two bound peers formed no authority under either configuration");
+    check(a.max_valid <= 1u && a.steps_multi_auth == 0u && a.conflicts == 0u && a.auth_outside == 0u,
+          "INV-LEADER-UNIQUE", "A: at most one valid authority, no incompatible configuration");
+    check(a.recovered && a.epoch_end == 2u && a.mask_end == a.target, "Lot 5",
+          "A: when the proposer returned the transaction completed on every node");
+
+    run_l5_proposer_crash(1, 400u, &b);
+    check(b.li >= 0 && b.committed_before_crash && !b.committed_partner && !b.committed_third, "Lot 5",
+          "B: the proposer committed and then failed with its commit frame undelivered");
+    check(b.committed_during_outage == 0u, "INV-RECONFIG-TRANSITION",
+          "B: no other node installed the new membership while the proposer was out of service");
+    check(b.valid_steps_during_outage == 0u, "INV-RECONFIG-TRANSITION",
+          "B: the remaining nodes took no authority under a configuration they had only accepted");
+    check(b.max_valid <= 1u && b.steps_multi_auth == 0u && b.conflicts == 0u && b.auth_outside == 0u,
+          "INV-LEADER-UNIQUE", "B: at most one valid authority, no incompatible configuration");
+    check(b.recovered && b.epoch_end == 2u && b.mask_end == b.target, "INV-RECONFIG-CONSISTENT",
+          "B: on its return the committed configuration propagated and every node converged on it");
+
+    run_l5_proposer_crash(2, 400u, &c);
+    check(c.li >= 0 && c.committed_before_crash && c.committed_partner && !c.committed_third, "Lot 5",
+          "C: the commit reached exactly one participant before the proposer failed");
+    check(c.valid_steps_during_outage == 0u, "INV-RECONFIG-TRANSITION",
+          "C: the two sides, holding different configurations, formed no authority");
+    check(c.max_valid <= 1u && c.steps_multi_auth == 0u && c.auth_outside == 0u,
+          "INV-LEADER-UNIQUE", "C: at most one valid authority throughout the partial commit");
+    check(c.recovered && c.epoch_end == 2u, "INV-RECONFIG-CONSISTENT",
+          "C: the node that missed the commit was brought to the committed configuration on recovery");
+    printf("        A (no acceptance received): installed during outage %u, authority steps %u, recovered %s\n",
+           a.committed_during_outage, a.valid_steps_during_outage, a.recovered ? "yes" : "no");
+    printf("        B (commit undelivered): installed during outage %u, authority steps %u, converged on 0x%02X epoch %u\n",
+           b.committed_during_outage, b.valid_steps_during_outage, b.mask_end, b.epoch_end);
+    /* D. the same interruption, held past the election-exhaustion budget.
+     * A membership of two tolerates no failure, so while the transaction is
+     * unresolved and the proposer is absent no quorum exists at all. The
+     * remaining nodes report that the way this system reports absence of
+     * quorum: they latch SAFE. That is the FDIR contract of Lot 3, not a
+     * safety failure, and it is the liveness price of the joint rule. */
+    run_l5_proposer_crash(1, 900u, &d);
+    check(d.li >= 0 && d.committed_before_crash, "Lot 5", "D: same interruption, longer outage");
+    check(d.max_valid <= 1u && d.steps_multi_auth == 0u && d.conflicts == 0u && d.auth_outside == 0u,
+          "INV-LEADER-UNIQUE", "D: safety held: at most one valid authority, no incompatible configuration");
+    check(d.safe_nodes > 0u, "Lot 5",
+          "D: past the election budget the remaining nodes reported absence of quorum by latching SAFE");
+    check(d.max_failed[d.keep] == g_bus.node[d.keep].cfg.max_failed_elections, "REQ-SAFE-0003",
+          "D: that latch came from genuinely exhausted elections, not from the membership change");
+    check(valid_leader_count() == 0, "INV-RECONFIG-AUTHORITY",
+          "D: no authority was manufactured to compensate for the lost quorum");
+
+    printf("        C (commit reached one participant): partner committed %s, third node committed %s, authority steps %u, converged %s\n",
+           c.committed_partner ? "yes" : "no", c.committed_third ? "yes" : "no",
+           c.valid_steps_during_outage, c.recovered ? "yes" : "no");
+    printf("        D (outage past the election budget): %u node(s) latched SAFE after %u failed elections, valid authorities %u, incompatible configurations %u\n",
+           d.safe_nodes, d.max_failed[d.keep], d.max_valid, d.conflicts);
+}
+
+/* TC-075: no frame a removed node can send restores its rights. */
+static void tc_075_removed_node_traffic(void)
+{
+    int li, keep, rem;
+    uint8_t target;
+    uint16_t term_li, term_keep, vt_li;
+    uint8_t vf_li;
+    uint32_t nm0, ren0, ack_rx0;
+    mosaik_msg_t m;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-075  traffic from a removed node cannot restore voting, authority or a lease [Lot 5]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+    check(l5_request(li, target, 200u, &l, &t) && l5_all_committed(target, 2u), "Lot 5",
+          "the third node was removed at epoch 2");
+
+    term_li = g_bus.node[li].term; term_keep = g_bus.node[keep].term;
+    vf_li = g_bus.node[li].voted_for; vt_li = g_bus.node[li].voted_term;
+    nm0 = g_bus.node[li].nonmember_rejections;
+    ren0 = g_bus.lease_renewals;
+    ack_rx0 = g_bus.node[li].last_ack_rx_ms[rem];
+
+    /* every consensus frame type, including one at a strictly higher term */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(rem + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(term_li + 5u), 9u);
+    deliver_to(li, &m); deliver_to(keep, &m);
+    make_msg(&m, MOSAIK_MSG_VOTE_REQ, (uint8_t)(rem + 1), MOSAIK_ROLE_CANDIDATE, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(term_li + 6u), 0u);
+    deliver_to(li, &m); deliver_to(keep, &m);
+    make_msg(&m, MOSAIK_MSG_VOTE_GRANT, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+             term_li, (uint8_t)(li + 1));
+    deliver_to(li, &m);
+    make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+             term_li, g_bus.node[li].seq);
+    deliver_to(li, &m);
+
+    check(g_bus.node[li].term == term_li && g_bus.node[keep].term == term_keep,
+          "INV-RECONFIG-REMOVED-NODE", "a higher term announced by the removed node was not adopted");
+    check(g_bus.node[li].voted_for == vf_li && g_bus.node[li].voted_term == vt_li,
+          "INV-ONE-VOTE-PER-TERM", "its vote request changed no vote memory");
+    check(g_bus.node[li].last_ack_rx_ms[rem] == ack_rx0, "INV-RECONFIG-REMOVED-NODE",
+          "its acknowledgement was not recorded as new quorum evidence");
+    check((g_bus.node[li].vote_mask & l5_bit(rem)) == 0u, "INV-RECONFIG-REMOVED-NODE",
+          "its vote grant was not counted");
+    check(g_bus.node[li].nonmember_rejections >= nm0 + 4u, "INV-RECONFIG-REMOVED-NODE",
+          "all four frame types were rejected as coming from outside the committed membership");
+    check(valid_leader_index() == li, "INV-LEADER-UNIQUE", "the leader kept its authority and its role");
+
+    /* a SAFE announcement from it is still FDIR evidence: membership does not
+     * gate fault reporting (Lot 4 discipline) */
+    make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE,
+             term_li, (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+    deliver_to(keep, &m);
+    check((g_bus.node[keep].safe_evidence_mask & l5_bit(rem)) != 0u, "INV-RECONFIG-LOT4",
+          "a SAFE announcement from a removed node is still recorded as fault evidence");
+    check(g_bus.node[keep].term == term_keep && valid_leader_index() == li, "INV-RECONFIG-LOT4",
+          "and it still has no consensus effect");
+
+    l5_run(&l, &t, 1000u);
+    check(g_bus.lease_renewals > ren0, "INV-RECONFIG-LOT2",
+          "the leader kept renewing its lease from its remaining member");
+    check(t.max_valid <= 1u && l.authority_outside_membership == 0u && l.same_epoch_mask_conflicts == 0u,
+          "INV-LEADER-UNIQUE", "one authority throughout, always inside a committed membership");
+    printf("        removed node %d: heartbeat at term %u, vote request, grant and acknowledgement all rejected (%u non-member rejections); SAFE evidence still accepted\n",
+           rem + 1, term_li + 5u, g_bus.node[li].nonmember_rejections - nm0);
+}
+
+/* TC-076: every membership transition the interface permits. */
+static void tc_076_permitted_transitions(void)
+{
+    int li, keep, rem, i;
+    uint8_t t_keep, t_rem, t_excl;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-076  every permitted transition: removal of either peer, re-admission, and a two-change transition [Lot 5]\n");
+
+    for (i = 0; i < 2; i++) {
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { check(false, "Lot 5", "leader existed"); return; }
+        survivors_of(li, &keep, &rem);
+        t_keep = (uint8_t)(l5_bit(li) | l5_bit(keep));
+        t_rem  = (uint8_t)(l5_bit(li) | l5_bit(rem));
+        l5_init(&l); traj_init(&t);
+        {
+            uint8_t target = (i == 0) ? t_keep : t_rem;
+            check(l5_request(li, target, 300u, &l, &t), "Lot 5", "the leader accepted the removal request");
+            check(l5_all_committed(target, 2u), "INV-RECONFIG-CONSISTENT",
+                  "the removal committed identically on every node");
+            check(t.max_valid <= 1u && l.steps_multi_auth == 0u && l.same_epoch_mask_conflicts == 0u &&
+                  l.authority_outside_membership == 0u,
+                  "INV-LEADER-UNIQUE", "one authority, one configuration per epoch, throughout the removal");
+            /* re-admission of the node that was just removed */
+            check(l5_request(li, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 600u, &l, &t), "Lot 5",
+                  "the leader accepted the re-admission request");
+            check(l5_all_committed((uint8_t)MOSAIK_MEMBERSHIP_ALL, 3u), "INV-RECONFIG-CONSISTENT",
+                  "the re-admission committed identically on every node");
+            l5_run(&l, &t, 1500u);
+            check(valid_leader_count() == 1 && t.max_valid <= 1u, "INV-LEADER-UNIQUE",
+                  "the re-admitted node rejoined without disturbing the single authority");
+            printf("        removal of node %d then re-admission: epochs 1 -> 2 -> 3, final mask 0x%02X, valid leader node %d\n",
+                   (i == 0 ? rem : keep) + 1, g_bus.node[li].committed_mask, valid_leader_index() + 1);
+        }
+    }
+
+    /* the leader cannot propose a membership that excludes itself */
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    if (li < 0) { check(false, "Lot 5", "leader existed"); return; }
+    survivors_of(li, &keep, &rem);
+    t_excl = (uint8_t)(l5_bit(keep) | l5_bit(rem));
+    check(!mosaik_request_reconfiguration(&g_bus.node[li], t_excl), "INV-RECONFIG-AUTHORITY",
+          "the only node able to propose cannot propose a configuration that excludes it");
+
+    /* a two-change transition {leader,keep} -> {leader,rem} */
+    l5_init(&l); traj_init(&t);
+    t_keep = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    t_rem  = (uint8_t)(l5_bit(li) | l5_bit(rem));
+    check(l5_request(li, t_keep, 300u, &l, &t) && l5_all_committed(t_keep, 2u), "Lot 5",
+          "first configuration committed");
+    check(l5_request(li, t_rem, 600u, &l, &t), "Lot 5", "two-change transition requested");
+    check(l5_all_committed(t_rem, 3u), "INV-RECONFIG-TRANSITION",
+          "a transition replacing one member by another committed only with a quorum of both configurations");
+    l5_run(&l, &t, 1500u);
+    check(t.max_valid <= 1u && l.steps_multi_auth == 0u && l.same_epoch_mask_conflicts == 0u &&
+          l.authority_outside_membership == 0u && t.term_regressions == 0u,
+          "INV-LEADER-UNIQUE", "the two-change transition kept one authority and one configuration per epoch");
+    printf("        two-change transition 0x%02X -> 0x%02X committed at epoch %u; valid leader node %d\n",
+           t_keep, t_rem, g_bus.node[li].committed_epoch, valid_leader_index() + 1);
+}
+
+/* TC-077: the host-model configuration store. */
+static void tc_077_configuration_persistence(void)
+{
+    int li, keep, rem;
+    uint8_t target;
+    mosaik_config_store_t bad;
+    l5_obs_t l; traj_obs_t t;
+
+    printf("TC-077  host-model configuration store: pending acceptance, committed configuration, corrupted content [Lot 5]\n");
+
+    /* A. a pending acceptance survives a cold restart */
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(l5_bit(li) | l5_bit(keep));
+    l5_init(&l); traj_init(&t);
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+    check(mosaik_request_reconfiguration(&g_bus.node[li], target), "Lot 5", "transaction opened");
+    l5_run(&l, &t, 150u);
+    check(g_bus.node[keep].accepted_epoch == 2u && g_bus.node[keep].accepted_mask == target,
+          "Lot 5", "the acceptor bound itself before the crash");
+    bus_crash_node(keep);
+    l5_run(&l, &t, 200u);
+    bus_restart_node(keep);
+    check(g_bus.node[keep].accepted_epoch == 2u && g_bus.node[keep].accepted_mask == target &&
+          g_bus.node[keep].committed_epoch == 1u,
+          "INV-RECONFIG-TRANSITION",
+          "A: the acceptance binding and the committed configuration survived the cold restart");
+    check(g_bus.node[keep].term == 0u, "Lot 5", "A: the restart was cold: no term, no vote was restored");
+
+    /* B. the committed configuration survives, and a corrupted store does not
+     *    install a foreign membership */
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
+    l5_run(&l, &t, 800u);
+    check(l5_all_committed(target, 2u), "Lot 5", "B: epoch 2 committed on every node");
+    bus_crash_node(rem);
+    l5_run(&l, &t, 200u);
+    bad.committed_epoch = 0u; bad.committed_mask = 0x00u; bad.accepted_epoch = 0u; bad.accepted_mask = 0u;
+    bus_restart_node_with_store(rem, &bad);
+    check(g_bus.node[rem].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+          g_bus.node[rem].committed_epoch == (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL,
+          "INV-RECONFIG-NO-MAGIC",
+          "B: an empty store is reset to the initial configuration, not to a membership of convenience");
+    bus_crash_node(rem);
+    l5_run(&l, &t, 200u);
+    bad.committed_epoch = 7u; bad.committed_mask = l5_bit(rem); bad.accepted_epoch = 0u; bad.accepted_mask = 0u;
+    bus_restart_node_with_store(rem, &bad);
+    check(g_bus.node[rem].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+          g_bus.node[rem].committed_epoch == (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL,
+          "INV-RECONFIG-PARTITION",
+          "B: a store naming a single-node membership is refused and reset: it cannot buy a quorum of one");
+    l5_run(&l, &t, 2000u);
+    check(l5_all_committed(target, 2u) || g_bus.node[rem].committed_epoch == 2u,
+          "INV-RECONFIG-CONSISTENT",
+          "B: the node with the reset store was brought back to the committed configuration by announcement");
+    check(g_bus.node[rem].state != MOSAIK_STATE_SAFE || !mosaik_is_member(&g_bus.node[rem]),
+          "Lot 5", "B: the node did not gain membership by restarting with a stale store");
+    check(t.max_valid <= 1u && l.steps_multi_auth == 0u && l.authority_outside_membership == 0u,
+          "INV-LEADER-UNIQUE", "no authority was manufactured through the persistence faults");
+    printf("        pending acceptance restored after cold restart (epoch %u mask 0x%02X); empty and single-node stores reset to 0x%02X epoch %u; node %d now at 0x%02X epoch %u\n",
+           g_bus.node[keep].accepted_epoch, g_bus.node[keep].accepted_mask,
+           (unsigned)MOSAIK_MEMBERSHIP_ALL, (unsigned)MOSAIK_CONFIG_EPOCH_INITIAL,
+           rem + 1, g_bus.node[rem].committed_mask, g_bus.node[rem].committed_epoch);
+}
+
+/* TC-078: interaction of a transaction with SAFE, DEGRADED, an election and a
+ * lease expiry. */
+static void tc_078_transaction_interactions(void)
+{
+    int safe_node, l2, a, b, i;
+    uint8_t target;
+    uint32_t deg_steps = 0u;
+    l5_obs_t l; traj_obs_t t;
+    uint32_t k;
+
+    printf("TC-078  a transaction alongside SAFE, DEGRADED, an election and a lease expiry [Lot 5]\n");
+
+    /* A. a SAFE node is removed by the healthy pair; DEGRADED persists */
+    bus_init(); bus_run(2000u);
+    safe_node = split_brain_leader();
+    check(safe_node >= 0, "Lot 5", "a node latched SAFE");
+    if (safe_node < 0) { return; }
+    survivors_of(safe_node, &a, &b);
+    l5_init(&l); traj_init(&t);
+    for (k = 0; k < 1500u && valid_leader_index() < 0; k++) { bus_step(); traj_step(&t); l5_step(&l); }
+    l2 = valid_leader_index();
+    check(l2 >= 0 && l2 != safe_node, "Lot 5", "the healthy pair elected a leader around the SAFE node");
+    if (l2 < 0) { return; }
+    target = (uint8_t)(0x07u & ~l5_bit(safe_node));
+    check(l5_request(l2, target, 600u, &l, &t), "Lot 5", "the new leader requested removal of the SAFE node");
+    check(g_bus.node[l2].committed_mask == target && g_bus.node[(l2 == a) ? b : a].committed_mask == target,
+          "INV-RECONFIG-CONSISTENT", "A: both healthy nodes committed the new membership");
+    check(g_bus.node[safe_node].state == MOSAIK_STATE_SAFE &&
+          !mosaik_has_valid_leadership_authority(&g_bus.node[safe_node]),
+          "INV-RECONFIG-LOT3", "A: the SAFE node stayed SAFE and held no authority");
+    for (k = 0; k < 500u; k++) {
+        bus_step(); traj_step(&t); l5_step(&l);
+        if (g_bus.node[l2].state == MOSAIK_STATE_DEGRADED) { deg_steps++; }
+    }
+    check(deg_steps > 0u, "INV-DEGRADED-PERSISTENT",
+          "A: the leader stayed DEGRADED on the SAFE node's evidence while holding authority");
+    check(t.max_valid <= 1u && l.authority_outside_membership == 0u, "INV-LEADER-UNIQUE",
+          "A: one authority throughout");
+
+    /* B. the proposer loses its lease during the transaction: nothing commits */
+    bus_init(); bus_run(2000u);
+    {
+        int li = leader_index(), keep, rem;
+        uint16_t epoch0;
+        if (li < 0) { check(false, "Lot 5", "leader existed"); return; }
+        survivors_of(li, &keep, &rem);
+        epoch0 = g_bus.node[li].committed_epoch;
+        l5_init(&l); traj_init(&t);
+        /* cut every inbound path to the leader: no acceptance, no acknowledgement */
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        bus_set_net_action((uint8_t)rem,  (uint8_t)li, NET_DROP, 0u);
+        check(mosaik_request_reconfiguration(&g_bus.node[li], (uint8_t)(l5_bit(li) | l5_bit(keep))),
+              "Lot 5", "B: the transaction started while the leader still held its lease");
+        l5_run(&l, &t, 1200u);
+        check(!mosaik_has_valid_leadership_authority(&g_bus.node[li]), "INV-RECONFIG-LOT2",
+              "B: the proposer lost its lease during the transaction");
+        check(g_bus.node[li].committed_epoch == epoch0, "INV-RECONFIG-TRANSITION",
+              "B: it committed nothing after losing authority");
+        check(CFGTX(li, MOSAIK_CFG_COMMIT) == 0u, "INV-RECONFIG-TRANSITION",
+              "B: no commit frame was ever emitted");
+        /* C. an election runs while the acceptances are still pending */
+        bus_set_full_connectivity();
+        l5_run(&l, &t, 3000u);
+        check(t.max_valid <= 1u && l.steps_multi_auth == 0u, "INV-LEADER-UNIQUE",
+              "C: the election that followed produced at most one valid authority");
+        check(l.same_epoch_mask_conflicts == 0u && l.authority_outside_membership == 0u,
+              "INV-RECONFIG-CONSISTENT", "C: no incompatible configuration appeared during the election");
+        check(t.term_regressions == 0u, "INV-TERM-MONOTONIC", "C: no term regression");
+        for (i = 0; i < N_NODES; i++) {
+            check(g_bus.node[i].committed_epoch == epoch0, "INV-RECONFIG-TRANSITION",
+                  "C: the abandoned transaction left every committed membership untouched");
+        }
+        printf("        SAFE node %d removed by the healthy pair (mask 0x%02X), DEGRADED held for %u steps; abandoned transaction committed nothing, epoch still %u\n",
+               safe_node + 1, target, deg_steps, epoch0);
+    }
 }
 
 int main(void)
@@ -5082,17 +5838,25 @@ int main(void)
     tc_059_lower_term_safe_announcement();
     tc_060_determinism_of_red_scenarios();
 
-    /* LOT 5: autonomous reconfiguration (Phase 1 RED baseline: TC-064..TC-068 expected RED) */
-    tc_061_membership_fixed();
+    /* LOT 5: autonomous reconfiguration (membership and quorum) */
+    tc_061_membership_representation();
     tc_062_peer_loss_is_not_removal();
     tc_063_minority_cannot_self_reconfigure();
-    tc_064_membership_change_unavailable();
-    tc_065_removal_consistency_before_quorum_change();
+    tc_064_membership_change_executes();
+    tc_065_consistency_before_quorum_change();
     tc_066_removed_node_rejoin();
-    tc_067_stale_configuration_replay();
-    tc_068_partition_during_reconfiguration();
+    tc_067_configuration_replay();
+    tc_068_partition_during_transition();
     tc_069_authority_lease_non_regression();
-    tc_070_determinism_of_lot5_scenarios();
+    tc_070_determinism_of_reconfiguration();
+    tc_071_conflicting_successors();
+    tc_072_transaction_idempotence();
+    tc_073_malformed_membership();
+    tc_074_proposer_failure();
+    tc_075_removed_node_traffic();
+    tc_076_permitted_transitions();
+    tc_077_configuration_persistence();
+    tc_078_transaction_interactions();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);

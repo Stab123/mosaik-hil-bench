@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include "mosaik_node.h"
 
 static mosaik_reject_reason_t g_last_reject_reason = MOSAIK_REJECT_NONE;
@@ -19,16 +20,104 @@ mosaik_reject_reason_t mosaik_get_last_reject_reason(const mosaik_node_t *node)
     return g_last_reject_reason;
 }
 
-static uint8_t quorum(const mosaik_node_t *n)
-{
-    return (uint8_t)((n->cfg.cluster_size / 2u) + 1u);
-}
-
 static uint8_t popcount8(uint8_t v)
 {
     uint8_t c = 0u;
     while (v) { c = (uint8_t)(c + (v & 1u)); v = (uint8_t)(v >> 1); }
     return c;
+}
+
+/* Lot 5: quorum of an explicit membership mask: floor(|mask| / 2) + 1.
+ * cfg.cluster_size no longer takes part. */
+static uint8_t quorum_of(uint8_t mask)
+{
+    return (uint8_t)((popcount8(mask) / 2u) + 1u);
+}
+
+static bool in_mask(uint8_t mask, uint8_t id)
+{
+    return id != 0u && id <= MOSAIK_MAX_NODES && (mask & (uint8_t)(1u << (id - 1u))) != 0u;
+}
+
+static uint8_t bit_of(uint8_t id)
+{
+    return (uint8_t)(1u << (id - 1u));
+}
+
+/* A membership mask a node may commit to: non-empty subset of the three
+ * nodes with at least two members. A one-node membership can never hold
+ * authority in this model and is refused. */
+static bool mask_valid(uint8_t mask)
+{
+    return mask != 0u && (mask & (uint8_t)~MOSAIK_MEMBERSHIP_ALL) == 0u && popcount8(mask) >= 2u;
+}
+
+static bool promise_pending(const mosaik_node_t *n)
+{
+    return n->accepted_epoch == (uint16_t)(n->committed_epoch + 1u);
+}
+
+/* Joint participation set. While a successor has been accepted but not
+ * committed, every node of C(n) OR C(n+1) takes part: a node needed by
+ * either quorum must be able to vote and to acknowledge. The intersection
+ * would be wrong here: for a transition such as {1,2} -> {1,3} it is the
+ * single node 1, which would silence the very nodes both quorums need.
+ * Safety comes from the quorum test below, not from this set. */
+uint8_t mosaik_effective_members(const mosaik_node_t *n)
+{
+    uint8_t e = n->committed_mask;
+    if (promise_pending(n)) {
+        e = (uint8_t)(e | n->accepted_mask);
+    }
+    return e;
+}
+
+bool mosaik_is_member(const mosaik_node_t *n)
+{
+    return in_mask(n->committed_mask, n->id);
+}
+
+/* Joint rule: a candidate holds a quorum only of the committed membership
+ * and, while a successor is accepted but not committed, of that successor
+ * as well. Votes outside the committed membership never count. */
+static bool election_quorum_reached(const mosaik_node_t *n)
+{
+    uint8_t v = n->vote_mask;
+    bool ok = popcount8((uint8_t)(v & n->committed_mask)) >= quorum_of(n->committed_mask);
+    if (promise_pending(n)) {
+        ok = ok && popcount8((uint8_t)(v & n->accepted_mask)) >= quorum_of(n->accepted_mask);
+    }
+    return ok;
+}
+
+bool mosaik_has_quorum_ack_evidence(const mosaik_node_t *n)
+{
+    uint8_t fresh = bit_of(n->id), i;
+    bool ok;
+    if (n->role != MOSAIK_ROLE_LEADER) { return false; }
+    for (i = 1u; i <= MOSAIK_MAX_NODES; i++) {
+        if (i == n->id) { continue; }
+        if (n->last_ack_term[i - 1u] == n->term &&
+            (uint32_t)(n->now_ms - n->last_ack_rx_ms[i - 1u]) < (uint32_t)n->cfg.heartbeat_period_ms) {
+            fresh |= bit_of(i);
+        }
+    }
+    ok = popcount8((uint8_t)(fresh & n->committed_mask)) >= quorum_of(n->committed_mask);
+    if (promise_pending(n)) {
+        ok = ok && popcount8((uint8_t)(fresh & n->accepted_mask)) >= quorum_of(n->accepted_mask);
+    }
+    return ok;
+}
+
+/* Lot 5 host-model persistence: write what the node itself decided. */
+static void config_persist(mosaik_node_t *n)
+{
+    if (n->store != NULL) {
+        n->store->committed_epoch = n->committed_epoch;
+        n->store->committed_mask  = n->committed_mask;
+        n->store->accepted_epoch  = n->accepted_epoch;
+        n->store->accepted_mask   = n->accepted_mask;
+    }
 }
 
 /* xorshift32, seeded per node. Deterministic, so test runs are reproducible. */
@@ -59,9 +148,34 @@ static void emit(mosaik_node_t *n, mosaik_msg_type_t type, uint8_t arg)
     msg.state   = n->state;
     msg.term    = n->term;
     msg.arg     = arg;
+    msg.cfg_stage = (uint8_t)MOSAIK_CFG_NONE;
+    msg.cfg_mask  = 0u;
 
     mosaik_encode(&frame, &msg);
     n->last_tx_ms = n->now_ms;
+    if (n->tx) {
+        n->tx(&frame, n->user);
+    }
+}
+
+/* Lot 5: CONFIG frames carry the membership epoch in the term field and
+ * do not touch last_tx_ms, so they never shift heartbeat or SAFE timing. */
+static void emit_config(mosaik_node_t *n, mosaik_cfg_stage_t stage, uint16_t epoch, uint8_t mask, uint8_t arg)
+{
+    mosaik_msg_t msg;
+    mosaik_frame_t frame;
+
+    msg.type      = MOSAIK_MSG_CONFIG;
+    msg.src       = n->id;
+    msg.version   = MOSAIK_PROTO_VERSION;
+    msg.role      = MOSAIK_ROLE_FOLLOWER;
+    msg.state     = MOSAIK_STATE_INIT;
+    msg.term      = epoch;
+    msg.arg       = arg;
+    msg.cfg_stage = (uint8_t)stage;
+    msg.cfg_mask  = mask;
+
+    mosaik_encode(&frame, &msg);
     if (n->tx) {
         n->tx(&frame, n->user);
     }
@@ -218,11 +332,197 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
         node->last_ack_seq[i] = 0u;
         node->last_ack_term[i] = 0u;
         node->last_safe_rx_ms[i] = 0u;
+        node->last_ack_rx_ms[i] = 0u;
     }
     node->safe_evidence_mask = 0u;
+    /* Lot 5: default configuration until a store is loaded. */
+    node->committed_epoch = (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL;
+    node->committed_mask  = (uint8_t)MOSAIK_MEMBERSHIP_ALL;
+    node->accepted_epoch  = 0u;
+    node->accepted_mask   = 0u;
+    node->proposing       = false;
+    node->proposal_epoch  = 0u;
+    node->proposal_mask   = 0u;
+    node->accept_set      = 0u;
+    node->proposal_start_ms = now_ms;
+    node->last_propose_tx_ms = now_ms;
+    node->last_cfg_announce_ms = now_ms;
+    node->store = NULL;
+    node->nonmember_rejections = 0u;
+    node->config_stale_rejections = 0u;
+    node->config_future_rejections = 0u;
+    node->config_conflict_rejections = 0u;
+    node->config_duplicates = 0u;
+    node->config_mismatch_observed = 0u;
+    node->config_commits = 0u;
     node->tx = tx;
     node->user = user;
     node->deadline_ms = now_ms + election_timeout(node);
+}
+
+void mosaik_load_config_store(mosaik_node_t *node, mosaik_config_store_t *store)
+{
+    node->store = store;
+    if (store == NULL) { return; }
+    if (store->committed_epoch == 0u || !mask_valid(store->committed_mask)) {
+        store->committed_epoch = (uint16_t)MOSAIK_CONFIG_EPOCH_INITIAL;
+        store->committed_mask  = (uint8_t)MOSAIK_MEMBERSHIP_ALL;
+        store->accepted_epoch  = 0u;
+        store->accepted_mask   = 0u;
+    }
+    node->committed_epoch = store->committed_epoch;
+    node->committed_mask  = store->committed_mask;
+    node->accepted_epoch  = store->accepted_epoch;
+    node->accepted_mask   = store->accepted_mask;
+}
+
+/* Lot 5: install a committed configuration. Only ever epoch + 1, only from
+ * the transaction. A node that leaves the membership drops any candidacy
+ * without touching its term or vote memory; a leader is never removed
+ * because a proposal must include its proposer. */
+static void config_commit(mosaik_node_t *n, uint16_t epoch, uint8_t mask)
+{
+    bool took_part = in_mask(mosaik_effective_members(n), n->id);
+
+    n->committed_epoch = epoch;
+    n->committed_mask  = mask;
+    n->config_commits++;
+    if (n->proposing && n->proposal_epoch == epoch) {
+        n->proposing = false;
+    }
+    config_persist(n);
+
+    if (!in_mask(mask, n->id)) {
+        /* This node is no longer a voter. It drops any candidacy and any
+         * leadership immediately: changing membership must never leave
+         * authority behind in a configuration that excludes its holder
+         * (INV-RECONFIG-AUTHORITY). Term and vote memory are untouched,
+         * and the node is NOT forced into SAFE: exclusion is not FDIR. */
+        if (n->role == MOSAIK_ROLE_LEADER) {
+            n->lease_expiry_ms = n->now_ms;   /* authority invalid from now on */
+        }
+        if (n->role != MOSAIK_ROLE_FOLLOWER) {
+            n->role = MOSAIK_ROLE_FOLLOWER;
+        }
+        n->vote_mask = 0u;
+    } else if (!took_part) {
+        /* Re-admitted. Its election deadline lapsed while it was passive;
+         * rearm it locally so it waits for the cluster's heartbeat instead
+         * of opening an election at a term it knows to be stale. */
+        n->deadline_ms = n->now_ms + election_timeout(n);
+    }
+}
+
+bool mosaik_request_reconfiguration(mosaik_node_t *n, uint8_t target_mask)
+{
+    uint16_t next = (uint16_t)(n->committed_epoch + 1u);
+    if (n->state == MOSAIK_STATE_SAFE)                    { return false; }
+    if (n->committed_epoch == 0xFFFFu)                    { return false; } /* no epoch wraparound */
+    if (!mosaik_is_member(n))                             { return false; }
+    if (!mosaik_has_valid_leadership_authority(n))        { return false; }
+    if (n->proposing)                                     { return false; }
+    if (!mask_valid(target_mask))                         { return false; }
+    if (!in_mask(target_mask, n->id))                     { return false; }
+    if (target_mask == n->committed_mask)                 { return false; }
+    if (n->accepted_epoch == next && n->accepted_mask != target_mask) { return false; }
+    n->proposing         = true;
+    n->proposal_epoch    = next;
+    n->proposal_mask     = target_mask;
+    n->accept_set        = bit_of(n->id);
+    n->accepted_epoch    = next;          /* the proposer's own binding */
+    n->accepted_mask     = target_mask;
+    n->proposal_start_ms = n->now_ms;
+    n->last_propose_tx_ms = n->now_ms;
+    config_persist(n);
+    emit_config(n, MOSAIK_CFG_PROPOSE, next, target_mask, 0u);
+    return true;
+}
+
+/* Lot 5: CONFIG frame handling. Never touches term, role (except a removed
+ * candidate), vote memory, lease or election timing. Epochs are compared
+ * explicitly; only epoch + 1 from a committed member can commit. */
+static void handle_config(mosaik_node_t *n, const mosaik_msg_t *m)
+{
+    uint16_t next = (uint16_t)(n->committed_epoch + 1u);
+    bool src_member = in_mask(n->committed_mask, m->src);
+
+    switch ((mosaik_cfg_stage_t)m->cfg_stage) {
+
+    case MOSAIK_CFG_PROPOSE:
+        /* The proposer must belong to the configuration this node has
+         * committed. A node that is itself a member additionally requires
+         * the proposer to be the leader it currently follows; a node that
+         * is not (one this configuration removed, or one being re-admitted)
+         * has no meaningful leader and accepts from any member. */
+        if (!src_member)                             { n->nonmember_rejections++; return; }
+        if (mosaik_is_member(n) && m->src != n->leader_id) { n->nonmember_rejections++; return; }
+        if (m->term < next)                          { n->config_stale_rejections++; return; }
+        if (m->term > next)                          { n->config_future_rejections++; return; }
+        if (!mask_valid(m->cfg_mask) || !in_mask(m->cfg_mask, m->src)) { n->config_mismatch_observed++; return; }
+        if (n->accepted_epoch == next) {
+            if (n->accepted_mask != m->cfg_mask)     { n->config_conflict_rejections++; return; }
+            n->config_duplicates++;                  /* idempotent: re-send the same acceptance */
+        } else {
+            n->accepted_epoch = next;
+            n->accepted_mask  = m->cfg_mask;
+            config_persist(n);
+        }
+        emit_config(n, MOSAIK_CFG_ACCEPT, next, m->cfg_mask, m->src);
+        return;
+
+    case MOSAIK_CFG_ACCEPT:
+        if (!n->proposing)                           { return; }
+        /* An acceptance counts when it comes from a node of either
+         * configuration of this transaction. A node that the proposal ADDS
+         * is not yet in the committed membership, yet its acceptance is
+         * exactly what the new quorum needs; it can never contribute to the
+         * old quorum, because the test below masks the set by each
+         * membership separately. */
+        if (!src_member && !in_mask(n->proposal_mask, m->src)) {
+            n->nonmember_rejections++; return;
+        }
+        if (m->term != n->proposal_epoch || m->cfg_mask != n->proposal_mask || m->arg != n->id) {
+            if (m->term < n->proposal_epoch) { n->config_stale_rejections++; }
+            return;
+        }
+        if ((n->accept_set & bit_of(m->src)) != 0u)  { n->config_duplicates++; return; }
+        n->accept_set |= bit_of(m->src);
+        /* Authorisation of C(n+1) requires a quorum of C(n) AND a quorum of
+         * C(n+1) among the acceptances actually received. A quorum of C(n)
+         * alone is NOT sufficient: it lets the proposer install the new
+         * configuration, and therefore the new lease rule, while the nodes
+         * that must still be counted under C(n) have promised nothing. The
+         * conjunction makes every acceptor of a committed configuration a
+         * member of both quorums, so no later leader can satisfy one
+         * configuration without the other (INV-RECONFIG-TRANSITION). */
+        if (popcount8((uint8_t)(n->accept_set & n->committed_mask)) >= quorum_of(n->committed_mask) &&
+            popcount8((uint8_t)(n->accept_set & n->proposal_mask)) >= quorum_of(n->proposal_mask)) {
+            uint16_t e = n->proposal_epoch;
+            uint8_t  k = n->proposal_mask;
+            config_commit(n, e, k);
+            emit_config(n, MOSAIK_CFG_COMMIT, e, k, 0u);
+        }
+        return;
+
+    case MOSAIK_CFG_COMMIT:
+    case MOSAIK_CFG_ANNOUNCE:
+        if (m->term == n->committed_epoch) {
+            if (m->cfg_mask == n->committed_mask) { n->config_duplicates++; }
+            else                                  { n->config_mismatch_observed++; }
+            return;
+        }
+        if (m->term < n->committed_epoch)            { n->config_stale_rejections++; return; }
+        if (m->term > next)                          { n->config_future_rejections++; return; }
+        /* epoch + 1: admissible only from a member of the configuration
+         * being superseded, for a valid mask that keeps the sender. */
+        if (!src_member)                             { n->nonmember_rejections++; return; }
+        if (!mask_valid(m->cfg_mask) || !in_mask(m->cfg_mask, m->src)) { n->config_mismatch_observed++; return; }
+        config_commit(n, m->term, m->cfg_mask);
+        return;
+
+    default:
+        return;
+    }
 }
 
 bool mosaik_is_leader(const mosaik_node_t *node)
@@ -245,6 +545,25 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
     }
     if (node->state == MOSAIK_STATE_SAFE) {
         return; /* SAFE is latched; recovery requires ground arbitration */
+    }
+
+    /* Lot 5: membership traffic is handled on its own, before any term
+     * processing: its epoch is a membership epoch, not a leadership term. */
+    if (msg.type == MOSAIK_MSG_CONFIG) {
+        handle_config(node, &msg);
+        return;
+    }
+
+    /* Lot 5 membership gate: consensus frames (HEARTBEAT, VOTE_REQ,
+     * VOTE_GRANT, ACK) from a source outside this node's committed
+     * membership, or received by a node that is itself no longer a member,
+     * carry no consensus evidence: no term adoption, no vote, no lease
+     * evidence, no leader evidence. SAFE frames remain FDIR evidence
+     * regardless of membership (Lot 4 discipline: FDIR is not consensus). */
+    if (msg.type != MOSAIK_MSG_SAFE &&
+        (!in_mask(node->committed_mask, msg.src) || !mosaik_is_member(node))) {
+        node->nonmember_rejections++;
+        return;
     }
 
     /* A higher term always wins: step down and adopt it.
@@ -326,6 +645,13 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
             return;
         }
         g_last_reject_reason = MOSAIK_REJECT_NONE;
+        /* Lot 5: grant only within the effective membership (joint rule
+         * while a successor is accepted but not committed). */
+        if (!in_mask(mosaik_effective_members(node), msg.src) ||
+            !in_mask(mosaik_effective_members(node), node->id)) {
+            node->nonmember_rejections++;
+            return;
+        }
         if (node->voted_term == msg.term && node->voted_for != 0u &&
             node->voted_for != msg.src) {
             return; /* one vote per term - this is what forbids split-brain */
@@ -347,8 +673,12 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         if (node->role != MOSAIK_ROLE_CANDIDATE) { return; }
         if (msg.term != node->term)               { return; }
         if (msg.arg  != node->id)                 { return; }
+        if (!in_mask(mosaik_effective_members(node), msg.src)) {
+            node->nonmember_rejections++;         /* Lot 5: a non-member's vote never counts */
+            return;
+        }
         node->vote_mask |= (uint8_t)(1u << (msg.src - 1u));
-        if (popcount8(node->vote_mask) >= quorum(node)) {
+        if (election_quorum_reached(node)) {
             become_leader(node);
         }
         break;
@@ -363,11 +693,16 @@ void mosaik_on_rx(mosaik_node_t *node, uint32_t now_ms, const mosaik_frame_t *fr
         g_last_reject_reason = MOSAIK_REJECT_NONE;
         
         if (msg.src >= 4u) return;  /* source validation */
-        
+        if (!in_mask(mosaik_effective_members(node), msg.src)) {
+            node->nonmember_rejections++;         /* Lot 5: no lease evidence from a non-member */
+            return;
+        }
+
         if (msg.term == node->term) {
             /* Record inbound ACK as per-peer quorum evidence (0-indexed peer). */
             node->last_ack_seq[msg.src - 1u] = msg.arg;
             node->last_ack_term[msg.src - 1u] = msg.term;
+            node->last_ack_rx_ms[msg.src - 1u] = now_ms;
             /* Do NOT directly update last_quorum_contact_ms here. */
             /* Per-peer evidence is recorded; quorum evaluation is separate. */
         }
@@ -424,6 +759,29 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
         }
     }
 
+    /* Lot 5: periodic announcement of the committed configuration (every
+     * five heartbeat periods). It repairs a COMMIT that did not reach a
+     * member and lets peers observe an inconsistent configuration. It
+     * carries no consensus evidence and never shifts heartbeat timing. */
+    if ((uint32_t)(now_ms - node->last_cfg_announce_ms) >= 5u * (uint32_t)node->cfg.heartbeat_period_ms) {
+        node->last_cfg_announce_ms = now_ms;
+        emit_config(node, MOSAIK_CFG_ANNOUNCE, node->committed_epoch, node->committed_mask, 0u);
+    }
+
+    /* Lot 5: proposer maintenance. A proposal is re-sent every heartbeat
+     * period while pending and abandoned after ten periods, or as soon as
+     * the proposer no longer holds valid authority. The acceptance binding
+     * is kept: the same successor may be proposed again for this epoch. */
+    if (node->proposing) {
+        if (!mosaik_has_valid_leadership_authority(node) ||
+            (uint32_t)(now_ms - node->proposal_start_ms) >= 10u * (uint32_t)node->cfg.heartbeat_period_ms) {
+            node->proposing = false;
+        } else if ((uint32_t)(now_ms - node->last_propose_tx_ms) >= (uint32_t)node->cfg.heartbeat_period_ms) {
+            node->last_propose_tx_ms = now_ms;
+            emit_config(node, MOSAIK_CFG_PROPOSE, node->proposal_epoch, node->proposal_mask, 0u);
+        }
+    }
+
     if (node->role == MOSAIK_ROLE_LEADER) {
         /* Leadership lease check: if lease has expired, the leader loses
          * valid authority and steps down to follower. It will start a new
@@ -436,6 +794,26 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
                 emit(node, MOSAIK_MSG_HEARTBEAT, node->seq++);
             }
         }
+        return;
+    }
+
+    /* Lot 5: taking part in consensus and standing for election are two
+     * different things. A node takes part (votes, acknowledges, is counted)
+     * whenever it belongs to EITHER configuration of a pending transaction,
+     * which is what mosaik_effective_members() returns. It may only STAND
+     * FOR ELECTION while it belongs to every configuration that might
+     * currently be in force: its committed membership and, while an
+     * acceptance is pending, the successor it has promised. A node the
+     * successor removes could otherwise spend its whole election budget on
+     * attempts that the pending commit would immediately undo, and latch
+     * SAFE for want of a quorum it was never entitled to assemble.
+     * It is not forced into SAFE: exclusion is not FDIR. It keeps its
+     * timers, term and vote memory, and stands again once a configuration
+     * that includes it is in force. */
+    if (!mosaik_is_member(node)) {
+        return;
+    }
+    if (promise_pending(node) && !in_mask(node->accepted_mask, node->id)) {
         return;
     }
 
