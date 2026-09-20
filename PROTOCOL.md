@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.7 — 20 September 2026
+**Issue:** 0.8 — 20 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -62,18 +62,42 @@ carrying no payload functions.
   discrete, watchdog or local fault input exists. Host software
   demonstrator only — no hardware validation.**
 
-## 3. Physical layer
+## 3. Physical layer — PLANNED, NOT VALIDATED
 
-The protocol uses 11-bit identifiers and an 8-byte payload, which is valid on
-both classical CAN 2.0B and CAN FD. The target has not yet been fixed:
+**No hardware exists.** Nothing in this section has been built, connected,
+powered or measured. Every value is PLANNED or UNVALIDATED, and none of it is
+evidence. Physical validation is LOT 6B.
 
-| Option | Bus | Note |
+The protocol uses 11-bit identifiers and an 8-byte payload, which is a valid
+payload on classical CAN 2.0B and on CAN FD alike. **The logical frame does
+not depend on which of the two carries it** (`docs/ICD-HIL.md` §5.1), so the
+choice of transport does not disturb the LOT 2 to LOT 5 evidence.
+
+| Item | Value | Status |
 |---|---|---|
-| ESP32-C5 | CAN FD, 500 kbit/s arbitration, 2 Mbit/s data | matches MOSAIK-ADD-0001; requires an FD-rated transceiver |
-| ESP32 classic | CAN 2.0B, 500 kbit/s | deviation from the parent architecture, to be declared in results |
+| Physical transport | CAN-FD | PLANNED |
+| Arbitration bitrate | 500 kbit/s | PLANNED, UNVALIDATED |
+| Data-phase bitrate | 2 Mbit/s | PLANNED, UNVALIDATED |
+| Data-phase bit-rate switching | not required — the payload is 8 bytes | decision, `docs/ICD-HIL.md` §5.1 |
+| Bus topology | linear, shared CANH/CANL | PLANNED |
+| Termination | 120 Ω at each of the two physical ends | PLANNED — a LOT 6B setup requirement, not a protocol requirement |
+| Measured bitrate, bus load, arbitration latency | — | **NONE** |
 
-Bit rate for the arbitration phase is 500 kbit/s in both cases. Bus
-termination is 120 Ω at each end.
+The planned bitrates are the values of MOSAIK-ADD-0001, retained as the
+starting bench configuration so that HIL results stay comparable with the
+parent architecture. They are **not** an ADD conformity claim and **not**
+measured; ADD-F004 remains open. Changing them on LOT 6B evidence is a
+legitimate HIL decision (`ROADMAP.md` §4.1).
+
+**Node platform.** The bench platform baseline is the substitutable choice of
+`ROADMAP.md` §4.2, to be settled by the physical-port work (LOT 11) and by
+procurement (LOT 13), not by this document. A candidate procurement
+configuration is recorded in `docs/ICD-HIL.md` §5.3; it is not a protocol
+requirement and nothing has been selected or ordered.
+
+*(Issue 0.8 removed an obsolete physical-layer table that named specific ESP32
+parts. It predated the HIL/Advanced separation and the roadmap's platform
+audit, and it stated termination as fact for a bus that does not exist.)*
 
 ## 4. Identifiers
 
@@ -114,6 +138,13 @@ two fields as follower and INIT respectively. Its bytes 4 and 5 carry a
 **configuration epoch**, which is never a leadership term (section 10.2).
 
 CRC-8 is SAE-J1850: polynomial `0x1D`, initial value `0xFF`, final XOR `0xFF`.
+It is an **application-layer** check covering the payload octets through the
+software path, the host bus, and injected or replayed frames. It is distinct
+from, and additional to, the link-layer CRC, bit stuffing and error counters
+that a CAN or CAN-FD controller applies in hardware. What each layer does and
+does not demonstrate is analysed in `docs/ICD-HIL.md` §7; in particular, no
+Hamming-distance or residual-error-rate argument for the combined stack exists
+or is claimed.
 
 A receiver rejects a frame whose identifier is unknown, whose DLC is not 8,
 whose version byte does not match, whose CRC fails, whose source id is out of
@@ -315,8 +346,15 @@ removed after a restart.
 Covered: loss of power of any single node, including the leader; loss of
 heartbeats; corrupted frames; partition leaving fewer than quorum nodes.
 
-Not covered: byzantine nodes, bus-off recovery, transceiver stuck-dominant
-faults, clock drift beyond the tolerance implied by the timeout margins.
+Since Lot 6A the model also contains a node's knowledge of **its own**
+transmitter: a locally reported transport status, including bus-off
+(section 11). The **software-facing contract** for that status is specified;
+the **protocol reaction to it is not implemented** at the LOT 6A RED baseline.
+
+Not covered: byzantine nodes; the hardware detection and recovery timing of
+bus-off; transceiver stuck-dominant faults; clock drift beyond the tolerance
+implied by the timeout margins. Every one of those needs hardware and is
+LOT 6B.
 
 ## 9. Traceability
 
@@ -333,8 +371,13 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 | **Lot 3: SAFE contract, DEGRADED evidence, recovery around SAFE, one-vote erratum** | **5, 7** | **TC-035 to TC-050** |
 | **Lot 4: election does not degrade, SAFE term not adopted, state metadata non-authoritative** | **5, 7** | **TC-051 to TC-060** |
 | **Lot 5: membership and quorum reconfiguration** | **4, 5, 10** | **TC-061 to TC-090** |
+| **Lot 6A: transport contract, ICD geometry, chronology** (HIL-derived, no ADD identifier) | **3, 5, 11** | **TC-091 to TC-100** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.
+
+The Lot 6A row is **HIL-derived**: `requirements/HIL-COMMS-REQUIREMENTS.md`
+carries no ADD requirement identifier, and none was invented. TC-092, TC-093,
+TC-096, TC-097 and TC-098 are RED at the LOT 6A RED baseline.
 
 ---
 
@@ -466,3 +509,91 @@ epoch permanently, because there is no prepare-and-adopt phase by which a new
 proposer would adopt the highest accepted value. Neither limitation produced
 a safety-invariant violation in the executed scenarios. See
 `LOT5_RECONFIGURATION_REPORT.md` sections 29 and 30.
+
+---
+
+## 11. Transport status and the bus-off contract (Lot 6A)
+
+**PRE-HARDWARE SPECIFICATION. The reaction specified in 11.2 is NOT
+implemented at the LOT 6A RED baseline.** The interface exists and is inert:
+the status is recorded and no protocol decision reads it. TC-092, TC-093,
+TC-096, TC-097 and TC-098 fail for exactly that reason, by design. The
+complete interface is specified in `docs/ICD-HIL.md` §3.
+
+### 11.1 What the status is
+
+Until Lot 6A a node could observe only that it heard nothing. That is a
+partition, and the bench has modelled it since Lot 2C. It could not observe
+that **it itself cannot speak**, which is a different fault with different
+evidence: a partitioned node knows nothing about its own transmitter, while a
+bus-off node knows, locally and immediately, that nothing it sends can reach
+anyone.
+
+`mosaik_set_transport_status()` carries that one fact, and only that fact:
+
+| Status | CAN error-confinement state | Can transmit? |
+|---|---|---|
+| UP | error-active | yes |
+| DEGRADED | error-passive | **yes** — a fault indication, not muteness |
+| BUS_OFF | bus-off | **no** |
+| RECOVERING | bus-off recovery in progress | **no** |
+
+**INV-TRANSPORT-LOCAL-EVIDENCE.** The status describes this node's own
+controller and nothing else. It carries no information about any peer, about
+topology, about whether any frame was delivered, about who is leader, or about
+membership. Passing a peer's status across this interface would be magical
+information and is forbidden. TC-091 is the standing guard.
+
+The three things that are easy to conflate are kept separate: **transport
+detection** is the platform's job and is measured in LOT 6B; **protocol
+reaction** is specified below; **recovery policy** is not commanded by the
+protocol core, which only reacts to what it is told. Detection and recovery
+**timing** are not specified here and are not validated, because no hardware
+exists.
+
+### 11.2 The reaction — specified, NOT yet implemented
+
+1. **No authority while mute.** A node whose own transport cannot transmit
+   holds no valid leadership authority, from the instant it knows. The lease
+   is not sufficient here: a lease is evidence of *past* reception, and local
+   muteness is *present* knowledge, which is strictly stronger. This is the
+   dangerous case, because an outage shorter than the 500 ms lease expires
+   nothing by itself (TC-096).
+2. **No transmission while mute.** The protocol core hands no frame to the
+   transmit interface, on any path, including the configuration path of
+   section 10. A frame given to a dead controller is either discarded or
+   queued, and a queued frame becomes stale traffic released after recovery.
+3. **No fabricated evidence.** A transport fault or its recovery creates no
+   lease renewal, acknowledgement evidence, vote or quorum contact. This
+   already holds, because evidence derives only from frames actually received
+   (Lot 2C); TC-094 keeps it holding.
+4. **Recovery restores nothing.** Authority may return only on evidence
+   actually received *after* recovery.
+5. **DEGRADED is not muteness.** An error-passive controller still transmits.
+   Silencing it would convert a recoverable fault into an outage (TC-093).
+
+### 11.3 Bus-off does not latch SAFE
+
+A bus-off node has lost the ability to communicate. It has **not** observed a
+violated invariant, and it is therefore not an FDIR event.
+
+This follows from the bench's existing safety semantics rather than being
+assumed. SAFE is latched and terminal within one powered instance and requires
+an operator reset (section 2), and both implemented causes are *observed
+violations*: split-brain, or three failed elections. Bus-off is a recoverable
+controller condition that the CAN standard expects controllers to recover
+from. Latching SAFE on it would make a transient fault permanently disable a
+node; it would also require the node to transmit SAFE announcements, which it
+cannot do while mute; and on recovery its peers would enter DEGRADED over a
+fault that had already cleared.
+
+The persistent case needs no new mechanism, because it is already covered by
+evidence: a node that stays mute fails elections and reaches SAFE through the
+existing NO_QUORUM path, with that cause. TC-095 measured exactly that and
+pins the decision, so that Lot 6A GREEN cannot quietly map BUS_OFF to SAFE.
+
+### 11.4 What is not specified here
+
+Hardware detection of bus-off, its latency, the recovery mechanism, recovery
+latency, and whether recovery is automatic or commanded. All four are
+LOT 6B and have **no evidence**.

@@ -224,6 +224,16 @@ Test Result / Evidence
 | TC-088 | REQ-SAFE-0003, REQ-SAFE-0004 | REQ-SAF-002, REQ-SAF-003 | Cluster_Task / svc_mosaik_proto | SAFE gate, DEGRADED evidence | PASS | IMPLEMENTED-SIM |
 | TC-089 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | lease, retransmission and abandonment timers | PASS (0 overlaps) | IMPLEMENTED-SIM |
 | TC-090 | REQ-FUNC-0001 (adversarial) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | whole reconfiguration path | PASS (4608 schedules) | IMPLEMENTED-SIM |
+| TC-091 | NONE (HIL-derived: HIL-COM-001/002/003) | — | svc_mosaik_proto | `mosaik_set_transport_status`, `mosaik_transport_can_transmit` | PASS | IMPLEMENTED-SIM |
+| TC-092 | NONE (HIL-derived: HIL-COM-004) | — | svc_mosaik_proto | `mosaik_has_valid_leadership_authority` | **RED (2 checks)** | NOT-STARTED |
+| TC-093 | NONE (HIL-derived: HIL-COM-005, HIL-COM-002) | — | svc_mosaik_proto | `emit()` transmit path | **RED (1 check)** | NOT-STARTED |
+| TC-094 | NONE (HIL-derived: HIL-COM-006) | — | Cluster_Task / svc_mosaik_proto | lease renewal, `last_ack_rx_ms`, `mosaik_has_quorum_ack_evidence` | PASS | IMPLEMENTED-SIM |
+| TC-095 | NONE (HIL-derived: HIL-COM-007) | — | svc_mosaik_proto | `enter_safe`, NO_QUORUM escalation path | PASS | IMPLEMENTED-SIM |
+| TC-096 | NONE (HIL-derived: HIL-COM-004, HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | lease window, post-recovery evidence | **RED (1 check)** | NOT-STARTED |
+| TC-097 | NONE (HIL-derived: HIL-COM-005) | — | svc_mosaik_proto | `emit()` acknowledgement and vote-grant paths | **RED (1 check)** | NOT-STARTED |
+| TC-098 | NONE (HIL-derived: HIL-COM-004/005/011) | — | Cluster_Task / svc_mosaik_proto | `emit_config()`, joint-quorum commit rule | **RED (2 checks)** | NOT-STARTED |
+| TC-099 | REQ-ICD-001 (related, not source) | REQ-ICD-001 | svc_mosaik_proto | `mosaik_encode`, `mosaik_decode` DLC and identifier rules | PASS | IMPLEMENTED-SIM |
+| TC-100 | REQ-FUNC-0007 / ADD-F007 (related, not source) | REQ-ICD-002 | svc_mosaik_proto + external observer | frame fields available at the transmit boundary | PASS (bound 25 600 ms) | IMPLEMENTED-SIM |
 
 ---
 
@@ -236,7 +246,7 @@ Test Result / Evidence
 | TC-003 | P-01 (failover latency) | PROVISIONAL | Sim vs hardware |
 | TC-004 | S-01 (SAFE latch) | PROVISIONAL | Receive path only |
 | TC-005 | F-03 (no quorum SAFE) | PROVISIONAL | 3-node subset |
-| TC-006 | I-01 (codec/CRC) | PROVISIONAL | Correlation_id gap |
+| TC-006 | I-01 (codec/CRC) | PROVISIONAL | Correlation_id gap; LOT 6A measured the gap and deferred `correlation_id` — see TC-100 and `docs/ICD-HIL.md` §6 |
 | TC-007 | F-04 (partition lease) | PROVISIONAL | LOT 2A specific; PARTIAL evidence for ADD R-04 — exercises one deterministic 3-node 2+1 partition scenario |
 | TC-008 | R-01 (stale term rejection) | PROVISIONAL | LOT 2B specific; semantic rejection only |
 | TC-009 | R-02 (expired lease replay) | PROVISIONAL | LOT 2B specific; requires isolation |
@@ -816,3 +826,76 @@ by the tests themselves: see `LOT5_RECONFIGURATION_REPORT.md` section 29.
 | INV-NO-STALE-RECOVERY | inherited | TC-067, TC-084 |
 | INV-TERM-MONOTONIC | inherited | TC-064, TC-086, Phase-3 oracle |
 | INV-ONE-VOTE-PER-TERM | inherited | TC-075, TC-084, TC-086 |
+
+---
+
+## 10. LOT 6A Test Cases Traceability (TC-091 through TC-100)
+
+**PRE-HARDWARE. NO PHYSICAL EVIDENCE.** TC-091 to TC-100 test the
+software-facing communication contract only. None measures a physical bus,
+bitrate, transceiver, arbitration delay, or real bus-off detection or recovery
+timing. Physical validation is LOT 6B and has no evidence.
+
+### 10.1 Requirement policy
+
+The LOT 6A requirements `HIL-COM-001` to `HIL-COM-011` and the invariants
+`INV-TRANSPORT-*`, `INV-ICD-FRAME-GEOMETRY` and `INV-CHRONOLOGY-SUFFICIENT` are
+**HIL-derived** (`requirements/HIL-COMMS-REQUIREMENTS.md`). They carry **no ADD
+requirement identifier and none was invented.** Where an ADD requirement is
+related — REQ-IF-0001, REQ-ICD-001, REQ-ICD-002, REQ-PERF-0004, REQ-FUNC-0007 —
+it is named as *related*, never as the source, and its ADD status is unchanged.
+ADD-F004 and ADD-F007 both remain OPEN.
+
+### 10.2 RED baseline
+
+| Test | Property | Checks | Result |
+|------|----------|--------|--------|
+| TC-091 | Transport status is local evidence about one node's own controller | 9 | PASS |
+| TC-092 | A mute leader holds no valid authority | 4 | **RED — 2 failing** |
+| TC-093 | A mute node hands no frame to its transmitter; DEGRADED still transmits | 3 | **RED — 1 failing** |
+| TC-094 | A transport outage fabricates no evidence | 5 | PASS |
+| TC-095 | Bus-off is not FDIR evidence and does not latch SAFE | 4 | PASS |
+| TC-096 | An outage shorter than the lease still revokes authority | 5 | **RED — 1 failing** |
+| TC-097 | A mute follower offers no acknowledgement or vote grant | 5 | **RED — 1 failing** |
+| TC-098 | Transport fault during a membership transaction | 6 | **RED — 2 failing** |
+| TC-099 | CAN-FD does not widen the logical frame | 5 | PASS |
+| TC-100 | Chronology without a correlation_id, and its measured bound | 4 | PASS |
+| | **Total** | **50** | **7 failing checks** |
+
+The seven failures are the LOT 6A counterexamples. Their single root cause is
+that the transport interface introduced at the RED baseline is **inert**: the
+status is recorded and no protocol decision reads it, so a mute node keeps
+emitting frames and keeps valid authority for the remainder of its 500 ms
+lease. Implementing the reaction specified in `PROTOCOL.md` §11.2 is LOT 6A
+GREEN and is deliberately not part of the RED commit.
+
+TC-001 to TC-090 are **unchanged**, and their output is byte-identical to
+commit `9ccd28e`.
+
+### 10.3 Invariant coverage
+
+| Invariant | Source | Tests |
+|-----------|--------|-------|
+| INV-TRANSPORT-LOCAL-EVIDENCE | HIL-derived | TC-091, TC-097 |
+| INV-TRANSPORT-NO-MUTE-AUTHORITY | HIL-derived | TC-092, TC-096, TC-098 |
+| INV-TRANSPORT-NO-TX | HIL-derived | TC-093, TC-097, TC-098 |
+| INV-TRANSPORT-NO-FABRICATED-EVIDENCE | HIL-derived | TC-094, TC-097 |
+| INV-TRANSPORT-NOT-FDIR | HIL-derived | TC-095, TC-092 |
+| INV-TRANSPORT-RECOVERY-NO-AUTHORITY | HIL-derived | TC-096 |
+| INV-ICD-FRAME-GEOMETRY | HIL-derived | TC-099 |
+| INV-CHRONOLOGY-SUFFICIENT | HIL-derived | TC-100 |
+| INV-FDIR-NO-MAGIC | inherited | TC-091, TC-097 |
+| INV-LEADER-UNIQUE | inherited, REQ-FUNC-0001 | TC-092, TC-096 |
+| INV-TERM-MONOTONIC | inherited | TC-096 |
+| INV-RECONFIG-QUORUM, INV-RECONFIG-CONSISTENT | HIL-derived (LOT 5) | TC-098 |
+
+### 10.4 No-magic boundary
+
+The harness injects a transport fault by reporting a status to **one node
+about its own controller** and by modelling the physical consequence: that
+node's frames do not reach the bus and bus frames do not reach it. No node is
+told which peer is faulted, which peers are alive, whether any frame was
+delivered, who the leader is, or what the membership should become. The
+emitted-frame counters `tx_attempts_while_down[]` and the chronology log are
+**observation only**: read by tests, never by any node. TC-091 and TC-097 are
+the standing guards on this boundary.

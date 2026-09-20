@@ -4,6 +4,11 @@ A three-node hardware-in-the-loop bench for the MOSAIK distributed avionics
 architecture: heartbeat, leader election, quorum and SAFE-mode logic over CAN,
 with a test suite traced to the architecture requirements.
 
+**The hardware does not exist yet.** Everything in this repository today runs
+on a deterministic host virtual bus. The bench's interface to a future
+physical CAN-FD bus is specified in `docs/ICD-HIL.md`; every physical value
+there is marked PLANNED or UNVALIDATED.
+
 Parent work: MOSAIK-ADD-0001, a TRL 3 architectural design dossier for a
 distributed fault-tolerant avionics architecture for LEO constellations
 (Swiss patent CH000441/2026).

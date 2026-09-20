@@ -1,7 +1,7 @@
 # MOSAÏK HIL Bench — Development Roadmap
 
 **Document:** MOSAIK-ROADMAP-001  
-**Issue:** 1.5 — 20 September 2026  
+**Issue:** 1.6 — 20 September 2026  
 **Parent (architectural reference, not conformity obligation):** MOSAIK-ADD-0001 (Issue 1 / Rev 1, dated 24 April 2026)  
 **Applies to:** `mosaik-hil-bench` only. The complete ADD-driven implementation is a separate future project, provisionally **MOSAÏK Advanced**.
 
@@ -62,7 +62,9 @@ Before Issue 1.5, LOT 8 was defined as the full six-node EN/CN/COMN architecture
 | **LOT 3** | FDIR and SAFE | SAFE contract, DEGRADED from received peer SAFE evidence, recovery around a SAFE node, TC-035–TC-050; PROTO_ERROR policy, local fault input, SAFE_ASSERT and PGA deferred | **IMPLEMENTED (host sim)** |
 | **LOT 4** | Local Mode Semantics (four-state host model) | INIT, NOMINAL, DEGRADED, SAFE × FOLLOWER, CANDIDATE, LEADER: election does not degrade (C1), SAFE announcement term is not consensus evidence (C2), state metadata non-authoritative, TC-051–TC-060; ADAPTIVE and PGA dependency-blocked, deferred to MOSAÏK Advanced | **IMPLEMENTED (host sim)** |
 | **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes: committed membership mask, configuration epoch, PROPOSE/ACCEPT/COMMIT transaction with joint old-and-new quorum, membership-aware elections and lease, removed-node exclusion, host-model configuration store, TC-061–TC-090 | **CLOSED — HOST DEMONSTRATOR** |
-| **LOT 6** | HIL Communication Substrate (CAN-FD / ICD) | A **controlled communication layer for the HIL experiment**: physical CAN-FD transport for the bench, frame format and ICD, bus-off handling, with deviations and limitations against the ADD explicitly documented. Physical measurements only where hardware actually exists. Not an attempt to reproduce the complete ADD communications architecture. | NOT STARTED |
+| **LOT 6** | HIL Communication Substrate (CAN-FD / ICD) | A **controlled communication layer for the HIL experiment**, split into a pre-hardware part and a physical part. Deviations and limitations against the ADD are explicitly documented. Physical measurements only where hardware actually exists. Not an attempt to reproduce the complete ADD communications architecture. | **NOT CLOSED** |
+| **LOT 6A** | Communication substrate, pre-hardware | Everything establishable without hardware: HIL communication requirements, the bench ICD (`docs/ICD-HIL.md`), the transport abstraction boundary, the encode/decode contract, frame and identifier rules, the **software-facing** transport status and bus-off contract, chronology and correlation requirements for LOT 7, host-testable transport-independent properties, and the LOT 6B physical validation plan. TC-091–TC-100. | **IN PROGRESS — PRE-HARDWARE** (RED baseline established) |
+| **LOT 6B** | Communication substrate, physical validation | Everything that requires hardware: bitrate validity, transceiver behaviour, electrical integrity, arbitration timing, bus load, clock drift, real bus-off detection and recovery timing, hardware error-frame behaviour, measured latency, physical partition behaviour. | NOT STARTED — **NO HARDWARE** |
 | **LOT 7** | Embedded Services and Experiment Observability | Time service, event logging and health monitoring sufficient to **timestamp and reconstruct the chronology of a HIL run** (section 6.2). CN-authoritative blackbox and COMN/GSE log export deferred to MOSAÏK Advanced. | NOT STARTED |
 | **LOT 8** | Experimental Function Ownership, Redistribution and Decision Safety Gate | Minimal experimental **function abstraction** (function identity, owner node, capability eligibility, execution state, handover/reassignment decision, safety preconditions) solely to test autonomous redistribution on the bench; plus an explicit **safety-decision gate** that refuses a safety-critical experimental action when the required authority, membership, freshness, health and function preconditions are not satisfied, records the refusal reason, and transitions to SAFE where the safety contract requires it. **The full EN/CN/COMN six-node architecture is NOT in scope for this repository** and is deferred to MOSAÏK Advanced. | NOT STARTED |
 | **LOT 9** | Adversarial and Campaign Verification | Systematic fault injection and statistical campaigns against the **integrated bench**: leader failure, multiple failures, partitions, asymmetric communication, message loss/delay/reorder, membership changes, function redistribution, unsafe decisions, SAFE transition, network heal, reconciliation and recovery. | NOT STARTED |
@@ -85,9 +87,10 @@ Every scope item of LOT 6 through LOT 15 was classified before this Issue was wr
 
 | Lot | Scope item | Class | Disposition |
 |-----|------------|-------|-------------|
-| 6 | Physical CAN-FD transport for the bench | A | Retained. Required for physical HIL. |
-| 6 | Frame format / ICD definition | C | Retained. Shared: the ICD is reused as an input to MOSAÏK Advanced. |
-| 6 | Bus-off handling | A | Retained. Bench robustness on a real bus. |
+| 6 | Physical CAN-FD transport for the bench | A | Retained. Required for physical HIL. **LOT 6B.** |
+| 6 | Frame format / ICD definition | C | Retained. Shared: the ICD is reused as an input to MOSAÏK Advanced. **Delivered by LOT 6A** as `docs/ICD-HIL.md`. |
+| 6 | Bus-off handling — software-facing contract | A | Retained. **LOT 6A**, specified in `PROTOCOL.md` §11; reaction not yet implemented. |
+| 6 | Bus-off handling — hardware detection and recovery timing | A | Retained. **LOT 6B**, no evidence. |
 | 6 | ADD bitrate conformity (500 kbit/s / 2 Mbit/s as a conformity claim) | D → B | The bench documents the bitrate it actually runs and its deviation; proving ADD bitrate conformity belongs to MOSAÏK Advanced (ADD-F004 remains open). |
 | 6 | `correlation_id` in the wire format (ADD-F007) | C | Retained only to the extent the chronology of section 6.2 needs it. |
 | 7 | Time service | A, C | Retained. Timestamping is a precondition of section 6.2. |
@@ -131,7 +134,8 @@ Likewise audited: **MicroLab** — retained, class A, it is the bench itself. **
 - LOT 2A is complete (host simulation only)
 - LOT 2B–2D depend on LOT 1 and LOT 2A
 - LOT 3–5 depend on LOT 2 family
-- LOT 6 is prerequisite for LOT 11–14
+- LOT 6A needs no hardware and is a prerequisite for LOT 6B
+- LOT 6B is prerequisite for LOT 11–14
 - LOT 7 depends on LOT 6 for the physical substrate; its host-side observability may be developed against the host model first
 - LOT 8 depends on LOT 5 (membership) and LOT 7 (observability), not on LOT 6
 - LOT 9 depends on LOT 2–5 and LOT 8
@@ -228,7 +232,8 @@ All evidence in this repository uses these classifications:
 | **LOT 0 Complete** | All governance docs created, traceability established, ADD findings documented, zero regression |
 | **LOT 1 Complete** | Protocol spec frozen, codec verified, basic state machine implemented |
 | **LOT 2 Family Complete** | All leadership/partition invariants implemented and tested in simulation |
-| **LOT 6 Complete** | CAN-FD physical layer validated on target hardware |
+| **LOT 6A Complete** | HIL communication requirements, bench ICD and the software-facing transport contract specified, implemented and green on the host; no hardware claim |
+| **LOT 6B Complete** | CAN-FD physical layer validated on target hardware, with measured evidence |
 | **LOT 11 Complete** | Full firmware builds on STM32H743/FreeRTOS |
 | **LOT 8 Complete** | Experimental function ownership, autonomous redistribution and the safety-decision gate implemented and tested in the bench |
 | **LOT 12 Complete** | HIL MicroLab operational with the three-node bench topology |

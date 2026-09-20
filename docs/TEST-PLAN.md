@@ -111,9 +111,25 @@ the traces are committed under `results/`.
 | TC-088 | SAFE and DEGRADED injected at every transaction stage | REQ-SAFE-0003/0004, Lot 5 Phase 3 | pass |
 | TC-089 | One-millisecond boundaries around the protocol timers | REQ-FUNC-0001, Lot 5 Phase 3 | pass (0 overlaps) |
 | TC-090 | Bounded deterministic schedule explorer | REQ-FUNC-0001, Lot 5 Phase 3 | pass (4608 schedules) |
+| TC-091 | Transport status is local evidence about one node's own controller only | HIL-COM-001/002/003, INV-TRANSPORT-LOCAL-EVIDENCE | pass (9 checks) |
+| TC-092 | A bus-off leader must hold no valid leadership authority | HIL-COM-004, INV-TRANSPORT-NO-MUTE-AUTHORITY | **RED — 2 failing checks** |
+| TC-093 | A bus-off node must hand no frame to its transmitter; DEGRADED still transmits | HIL-COM-005/002, INV-TRANSPORT-NO-TX | **RED — 1 failing check** |
+| TC-094 | A transport outage fabricates no lease, acknowledgement or quorum evidence | HIL-COM-006, INV-TRANSPORT-NO-FABRICATED-EVIDENCE | pass (5 checks) |
+| TC-095 | Bus-off is not FDIR evidence and does not latch SAFE by itself | HIL-COM-007, INV-TRANSPORT-NOT-FDIR | pass (4 checks) |
+| TC-096 | An outage shorter than the lease still revokes authority; recovery restores none | HIL-COM-004/008, INV-TRANSPORT-RECOVERY-NO-AUTHORITY | **RED — 1 failing check** |
+| TC-097 | A bus-off follower must offer no acknowledgement or vote grant | HIL-COM-005, INV-TRANSPORT-NO-TX | **RED — 1 failing check** |
+| TC-098 | Transport fault during a membership transaction: no mute authority, no mute CONFIG traffic, joint quorum intact | HIL-COM-004/005/011 | **RED — 2 failing checks** |
+| TC-099 | CAN-FD transport does not widen the logical frame; FD payload lengths rejected | HIL-COM-009, INV-ICD-FRAME-GEOMETRY | pass (5 checks) |
+| TC-100 | Chronology reconstruction without a correlation_id, and its measured boundary | HIL-COM-010, INV-CHRONOLOGY-SUFFICIENT | pass (4 checks) |
 
-Current total at commit `9ccd28e`: 90 tests, 761 checks, 0 failures,
-sanitizer clean. RED-before-fix evidence is preserved in history:
+Previous total at commit `9ccd28e`: 90 tests, 761 checks, 0 failures,
+sanitizer clean.
+
+**Current total at the LOT 6A RED baseline: 100 tests, 811 checks, 7 failures,
+sanitizer clean.** The seven failures are intentional and are the LOT 6A
+counterexamples: TC-092 (2), TC-093 (1), TC-096 (1), TC-097 (1), TC-098 (2).
+TC-001 to TC-090 are unchanged and their output is byte-identical to
+`9ccd28e`. RED-before-fix evidence is preserved in history:
 TC-031 was added RED at `d38985d` (6 failing checks) and passes since
 `f4e0f3c` (LOT 2D); TC-035–TC-050 were added at `af5da87` with 13 failing
 checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048 and TC-050; TC-050
@@ -139,8 +155,31 @@ schedule explorer. The committed and reproducible adversarial evidence is
 6236 in-suite schedules; exploratory work outside the repository is not
 counted as evidence.
 
+**LOT 6A test phase (pre-hardware).** TC-091 to TC-100 test the
+**software-facing** communication contract only. None of them measures a
+physical bus, a bitrate, a transceiver, an arbitration delay or a real bus-off
+detection or recovery time; no hardware exists and no such claim is made.
+Physical validation is LOT 6B. The transport fault is injected by the harness
+as a status reported to **one node about its own controller**, together with
+the physical consequence that its frames do not reach the bus and bus frames
+do not reach it. No node is told anything about any peer, and the emitted-frame
+counters are observation only, read by tests and never by a node.
+
+TC-092, TC-093, TC-096, TC-097 and TC-098 are RED by design: the transport
+interface added at the RED baseline is inert — the status is recorded and no
+protocol decision reads it. Implementing the reaction specified in
+`PROTOCOL.md` §11.2 is LOT 6A GREEN and is deliberately not part of the RED
+commit.
+
+TC-100 reports a measured limitation rather than asserting its absence: the
+heartbeat sequence is one byte, so (source, term, sequence) repeats after
+25 600 ms within a single term — 41 repeats were observed in a 30 s stable
+term. The external observer's timestamp is therefore **required**, and with it
+no `correlation_id` is needed (`docs/ICD-HIL.md` §6).
+
 Run with `make test`. The suite returns a non-zero exit code on any failure and
-is executed on every push by the CI workflow.
+is executed on every push by the CI workflow. **At the LOT 6A RED baseline the
+suite exits non-zero by design.**
 
 ## 3. Level 2 measurement method
 
@@ -165,7 +204,7 @@ and is therefore not used for REQ-004.
 | REQ-004 | interval from last heartbeat of the failed leader to first heartbeat of the new leader | bus timestamps |
 | REQ-004 | interval between leadership GPIO falling on the old leader and rising on the new one | logic analyser |
 | REQ-005 | interval from injected frame on the bus to SAFE GPIO rising | logic analyser |
-| — | bus load at 500 kbit/s under nominal traffic | bus timestamps |
+| — | bus load at the planned 500 kbit/s arbitration bitrate under nominal traffic (PLANNED, no hardware) | bus timestamps |
 
 **Sample size.** Thirty repetitions per measurand. Reporting minimum, median,
 maximum and standard deviation. A single figure is not reported.
@@ -210,4 +249,11 @@ reported, not discarded.
   observes states and transmissions but supplies no evidence to any node.
   PROTO_ERROR is reserved and never raised. TC-042 isolation durations are
   deterministic host observations, not timing bounds.**
+- **Lot 6A is pre-hardware. The transport status, the bus-off contract and the
+  ICD are specified and host-tested as software behaviour only. Hardware
+  bus-off detection and recovery timing, bitrates, transceiver behaviour,
+  electrical integrity, arbitration timing, bus load, clock drift and
+  hardware error-frame behaviour have NO evidence and are LOT 6B. The
+  protocol reaction to a transport fault is NOT implemented at the RED
+  baseline.**
 - **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**

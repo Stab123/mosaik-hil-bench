@@ -85,6 +85,45 @@ typedef struct {
     uint8_t  accepted_mask;
 } mosaik_config_store_t;
 
+/* LOT 6A: software-facing transport status (PRE-HARDWARE SPECIFICATION).
+ *
+ * This is the smallest local input that lets a node distinguish "I cannot
+ * hear anyone" (a partition, already modelled since Lot 2C) from "I myself
+ * cannot speak" (a transmitter fault, which a partition never tells a node
+ * about). It is LOCAL EVIDENCE ABOUT THIS NODE ONLY. It carries no
+ * information about any peer, about topology, about who is leader, or about
+ * whether any frame was delivered anywhere. A platform reports it from its
+ * own controller; nothing derives it from the bus.
+ *
+ * The four values are the software-facing abstraction of the CAN error-
+ * confinement states, which exist in the CAN standard itself and are
+ * therefore not invented here:
+ *
+ *   UP          error-active: the controller transmits and acknowledges
+ *               normally.
+ *   DEGRADED    error-passive: the controller still transmits, but its
+ *               error counters show a persistent fault. Transmission is
+ *               still possible, so this is not muteness.
+ *   BUS_OFF     the controller has removed itself from the bus. It cannot
+ *               transmit at all. This is LOCAL KNOWLEDGE OF OWN MUTENESS.
+ *   RECOVERING  bus-off recovery is in progress and not complete. The
+ *               controller is still mute.
+ *
+ * HARDWARE DETECTION AND RECOVERY TIMING ARE NOT SPECIFIED HERE and are not
+ * validated: they are LOT 6B, and no hardware exists. LOT 6A specifies only
+ * what the protocol core must do with a status that some platform reports.
+ *
+ * LOT 6A RED BASELINE: the status is recorded and can be read back, and it
+ * is NOT read by any protocol decision. Transmission, leadership authority,
+ * lease and mode semantics ignore it entirely. The tests TC-092, TC-093,
+ * TC-096, TC-097 and TC-098 fail because of that, by design. */
+typedef enum {
+    MOSAIK_TRANSPORT_UP         = 0,
+    MOSAIK_TRANSPORT_DEGRADED   = 1,
+    MOSAIK_TRANSPORT_BUS_OFF    = 2,
+    MOSAIK_TRANSPORT_RECOVERING = 3
+} mosaik_transport_status_t;
+
 /* Message rejection reason codes for test instrumentation. */
 typedef enum {
     MOSAIK_REJECT_NONE = 0,
@@ -166,6 +205,14 @@ typedef struct {
     uint32_t         config_mismatch_observed;  /* same epoch, different mask (inconsistency) */
     uint32_t         config_commits;
 
+    /* LOT 6A: locally reported transport status, the time it was last set on
+     * this node's own clock, and how many times it changed. SPECIFICATION
+     * ONLY in the RED baseline: written by mosaik_set_transport_status(),
+     * read by no protocol decision. */
+    uint8_t          transport_status;
+    uint32_t         transport_status_ms;
+    uint32_t         transport_status_changes;
+
     /* Observability, for the test bench and for the on-target trace. */
     uint32_t         became_leader_ms;
     uint32_t         safe_entry_ms;
@@ -237,5 +284,26 @@ uint8_t mosaik_effective_members(const mosaik_node_t *node);
  * of the accepted successor, the leader itself included. Used by the
  * caller's lease renewal; outbound traffic never counts. */
 bool mosaik_has_quorum_ack_evidence(const mosaik_node_t *node);
+
+/* LOT 6A: report this node's own transport status. The only legitimate
+ * caller is the platform layer that owns this node's CAN controller, or the
+ * host bench standing in for it. Passing another node's status would be
+ * magical information and is forbidden by INV-TRANSPORT-LOCAL-EVIDENCE.
+ * A cold restart through mosaik_init() resets the status to UP, matching a
+ * controller that re-enters error-active when it is re-initialised. */
+void mosaik_set_transport_status(mosaik_node_t *node, uint32_t now_ms,
+                                 mosaik_transport_status_t status);
+
+/* LOT 6A: the status this node last reported about itself. */
+mosaik_transport_status_t mosaik_get_transport_status(const mosaik_node_t *node);
+
+/* LOT 6A: whether this node's own transport is able to transmit at all.
+ * False exactly for BUS_OFF and RECOVERING, which are the two states in
+ * which the controller has removed itself from the bus. DEGRADED
+ * (error-passive) still transmits and is therefore not muteness.
+ *
+ * RED BASELINE: this predicate is correct and no protocol path consults it.
+ * Making the protocol honour it is LOT 6A GREEN, not this commit. */
+bool mosaik_transport_can_transmit(const mosaik_node_t *node);
 
 #endif /* MOSAIK_NODE_H */

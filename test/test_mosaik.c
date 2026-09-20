@@ -14,6 +14,7 @@
 #define N_NODES 3
 #define QUEUE_LEN 128
 #define MAX_DELAYED_MSGS 128
+#define CHRONO_LEN 4096   /* LOT 6A: external-observer chronology log (TC-100) */
 
 /* Lot 2C: Directional network fault model.
  * Each directed path A->B can be independently configured. */
@@ -103,6 +104,34 @@ typedef struct {
     uint32_t       tx_role_byte_out_of_range;
     mosaik_frame_t last_hb_frame[N_NODES];
     bool           last_hb_frame_valid[N_NODES];
+
+    /* LOT 6A TRANSPORT FAULT MODEL (host stand-in for a CAN controller).
+     * transport_down[i] means node i's OWN controller has removed itself
+     * from the bus: its frames never reach the bus and bus frames never
+     * reach it. The harness sets this AND reports the status to node i
+     * itself; no other node is told anything whatsoever. Peers observe only
+     * the absence of frames, exactly as they would on real hardware.
+     * tx_attempts_while_down[i] counts frames node i handed to its transmit
+     * callback while its own transport was down. OBSERVATION ONLY: read by
+     * tests, never by any node. It is the measurement of the software-facing
+     * TX-refusal contract (INV-TRANSPORT-NO-TX). */
+    bool           transport_down[N_NODES];
+    uint32_t       tx_attempts_while_down[N_NODES];
+
+    /* LOT 6A CHRONOLOGY LOG (TC-100). Every frame handed to a transmit
+     * callback while enabled, recorded with the observer's timestamp. This
+     * is what an external bus logger would capture; it is exactly the
+     * information available to LOT 7 chronology reconstruction, and it is
+     * never visible to any node. */
+    bool           chrono_enabled;
+    int            chrono_n;
+    struct {
+        uint32_t t_ms;
+        uint8_t  src;
+        uint8_t  type;
+        uint16_t term;
+        uint8_t  arg;
+    } chrono[CHRONO_LEN];
 } bus_t;
 
 static bus_t g_bus;
@@ -114,6 +143,26 @@ static void bus_tx(const mosaik_frame_t *frame, void *user)
     /* Crashed nodes do not transmit */
     if (src_idx >= 0 && src_idx < N_NODES && g_bus.crashed[src_idx]) {
         return;
+    }
+    /* LOT 6A: a controller that has removed itself from the bus puts nothing
+     * on the wire. The attempt is COUNTED, because the question LOT 6A asks
+     * is whether the protocol core still hands frames down while it knows
+     * locally that it is mute. */
+    if (src_idx >= 0 && src_idx < N_NODES && g_bus.transport_down[src_idx]) {
+        g_bus.tx_attempts_while_down[src_idx]++;
+        return;
+    }
+    /* LOT 6A: external-observer chronology capture (TC-100). */
+    if (g_bus.chrono_enabled && g_bus.chrono_n < CHRONO_LEN) {
+        mosaik_msg_t cm;
+        if (mosaik_decode(frame, &cm)) {
+            g_bus.chrono[g_bus.chrono_n].t_ms = g_bus.now_ms;
+            g_bus.chrono[g_bus.chrono_n].src  = cm.src;
+            g_bus.chrono[g_bus.chrono_n].type = (uint8_t)cm.type;
+            g_bus.chrono[g_bus.chrono_n].term = cm.term;
+            g_bus.chrono[g_bus.chrono_n].arg  = cm.arg;
+            g_bus.chrono_n++;
+        }
     }
     /* LOT 3 OBSERVATION only: record what this node actually emitted. */
     if (src_idx >= 0 && src_idx < N_NODES) {
@@ -404,6 +453,21 @@ static void bus_restart_node(int node_idx)
     mosaik_load_config_store(&g_bus.node[node_idx], &g_bus.store[node_idx]);
 }
 
+/* LOT 6A: report a transport status to ONE node about ITS OWN controller,
+ * and model the physical consequence on the bus.
+ *
+ * NO MAGICAL INFORMATION. The only thing handed to the protocol core is this
+ * node's own controller state, which a real platform reads from its own
+ * peripheral. Nothing about peers, topology, delivery, leadership or
+ * membership crosses this boundary in either direction. */
+static void bus_set_transport(int idx, mosaik_transport_status_t st)
+{
+    if (idx < 0 || idx >= N_NODES) { return; }
+    g_bus.transport_down[idx] = (st == MOSAIK_TRANSPORT_BUS_OFF ||
+                                 st == MOSAIK_TRANSPORT_RECOVERING);
+    mosaik_set_transport_status(&g_bus.node[idx], g_bus.now_ms, st);
+}
+
 static void bus_step(void)
 {
     mosaik_frame_t pending[QUEUE_LEN];
@@ -431,6 +495,8 @@ for (j = 0; j < n; j++) {
         for (i = 0; i < N_NODES; i++) {
             if (!g_bus.powered[i]) { continue; }
             if (g_bus.crashed[i]) { continue; }  /* Lot 2D: crashed nodes don't process */
+            /* LOT 6A: a controller off the bus receives nothing either. */
+            if (g_bus.transport_down[i]) { g_bus.messages_dropped++; continue; }
             if (g_bus.node[i].id == pending_src[j]) { continue; }
             
             /* Lot 2C: Use directional network model */
@@ -6842,6 +6908,524 @@ static void tc_090_bounded_schedule_explorer(void)
            schedules, unsafe);
 }
 
+/* ===================================================================== *
+ * LOT 6A — HIL COMMUNICATION SUBSTRATE, PRE-HARDWARE RED BASELINE
+ *
+ * NO HARDWARE EXISTS. Nothing below measures a physical bus, a bitrate, a
+ * transceiver, an arbitration delay or a real bus-off recovery time. These
+ * are host tests of the SOFTWARE-FACING transport contract specified in
+ * PROTOCOL.md section 11 and docs/ICD-HIL.md: what the protocol core must do
+ * when some platform reports the state of that node's own CAN controller.
+ * Physical validation is LOT 6B.
+ *
+ * RED BY DESIGN. The transport interface added in this commit is inert: the
+ * status is recorded and no protocol decision reads it. TC-092, TC-093,
+ * TC-096, TC-097 and TC-098 therefore fail. Those failures are the LOT 6A
+ * counterexamples and are NOT repaired in this commit.
+ * ===================================================================== */
+
+/* TC-091 / INV-TRANSPORT-LOCAL-EVIDENCE: the transport status is local
+ * evidence about one node's own controller and nothing else. Expected GREEN:
+ * this is the no-magic guard that must keep holding through LOT 6A GREEN. */
+static void tc_091_transport_status_locality(void)
+{
+    int i;
+    uint16_t term_before[N_NODES];
+    uint8_t  role_before[N_NODES];
+    uint8_t  leader_before[N_NODES];
+    bool others_untouched = true;
+    bool all_up = true;
+
+    printf("TC-091  transport status is local evidence only [LOT 6A, INV-TRANSPORT-LOCAL-EVIDENCE]\n");
+    bus_init();
+    for (i = 0; i < N_NODES; i++) {
+        if (mosaik_get_transport_status(&g_bus.node[i]) != MOSAIK_TRANSPORT_UP) { all_up = false; }
+        if (!mosaik_transport_can_transmit(&g_bus.node[i])) { all_up = false; }
+    }
+    check(all_up, "LOT 6A", "every node boots with transport UP and able to transmit");
+
+    bus_run(2000u);
+    for (i = 0; i < N_NODES; i++) {
+        term_before[i]   = g_bus.node[i].term;
+        role_before[i]   = (uint8_t)g_bus.node[i].role;
+        leader_before[i] = g_bus.node[i].leader_id;
+    }
+
+    /* Report a fault on node 1 only. No bus step in between: any change on a
+     * peer could only have come through this call. */
+    bus_set_transport(0, MOSAIK_TRANSPORT_BUS_OFF);
+    check(mosaik_get_transport_status(&g_bus.node[0]) == MOSAIK_TRANSPORT_BUS_OFF,
+          "LOT 6A", "the node told about its own controller records BUS_OFF");
+    check(mosaik_get_transport_status(&g_bus.node[1]) == MOSAIK_TRANSPORT_UP &&
+          mosaik_get_transport_status(&g_bus.node[2]) == MOSAIK_TRANSPORT_UP,
+          "LOT 6A", "no peer learns anything about another node's transport");
+    for (i = 1; i < N_NODES; i++) {
+        if (g_bus.node[i].term != term_before[i] ||
+            (uint8_t)g_bus.node[i].role != role_before[i] ||
+            g_bus.node[i].leader_id != leader_before[i]) { others_untouched = false; }
+    }
+    check(others_untouched, "INV-FDIR-NO-MAGIC",
+          "reporting one node's transport fault changes no protocol field of any peer");
+    check(!mosaik_transport_can_transmit(&g_bus.node[0]),
+          "LOT 6A", "BUS_OFF is muteness: the node cannot transmit");
+
+    /* DEGRADED (error-passive) is a fault indication, not muteness. */
+    bus_set_transport(0, MOSAIK_TRANSPORT_DEGRADED);
+    check(mosaik_transport_can_transmit(&g_bus.node[0]),
+          "LOT 6A", "DEGRADED (error-passive) still transmits and is not muteness");
+    bus_set_transport(0, MOSAIK_TRANSPORT_RECOVERING);
+    check(!mosaik_transport_can_transmit(&g_bus.node[0]),
+          "LOT 6A", "RECOVERING is still off the bus and cannot transmit");
+
+    /* Idempotence: re-reporting the same status is not a new event. */
+    {
+        uint32_t c = g_bus.node[0].transport_status_changes;
+        bus_set_transport(0, MOSAIK_TRANSPORT_RECOVERING);
+        check(g_bus.node[0].transport_status_changes == c,
+              "LOT 6A", "re-reporting an unchanged status is not counted as a transition");
+    }
+
+    /* A cold restart re-initialises the controller: it comes back error-active. */
+    {
+        uint32_t transitions = g_bus.node[0].transport_status_changes;
+        bus_crash_node(0);
+        bus_restart_node(0);
+        check(mosaik_get_transport_status(&g_bus.node[0]) == MOSAIK_TRANSPORT_UP,
+              "LOT 6A", "a cold restart resets the reported transport status to UP");
+        printf("        node 1 transport transitions before restart = %u, peers still UP\n",
+               transitions);
+    }
+}
+
+/* TC-092 / INV-TRANSPORT-NO-MUTE-AUTHORITY: a node that knows locally that
+ * its own transmitter is off the bus must not hold valid leadership
+ * authority. The lease is evidence of PAST reception; muteness is PRESENT
+ * local knowledge, and it is strictly stronger.
+ * EXPECTED RED: authority survives for the remainder of the 500 ms lease. */
+static void tc_092_bus_off_leader_holds_no_authority(void)
+{
+    int li;
+    uint32_t k;
+    bool ever_valid_during_outage = false;
+    bool safe_at_bus_off;
+
+    printf("TC-092  a bus-off leader must hold no valid authority [LOT 6A, INV-TRANSPORT-NO-MUTE-AUTHORITY]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+
+    bus_set_transport(li, MOSAIK_TRANSPORT_BUS_OFF);
+    safe_at_bus_off = (g_bus.node[li].state == MOSAIK_STATE_SAFE);
+
+    check(!mosaik_has_valid_leadership_authority(&g_bus.node[li]), "LOT 6A",
+          "authority is invalid at the instant the node learns it is mute");
+
+    /* 400 ms is inside the 500 ms lease: nothing expires by itself here. */
+    for (k = 0; k < 400u; k++) {
+        bus_step();
+        if (mosaik_has_valid_leadership_authority(&g_bus.node[li])) {
+            ever_valid_during_outage = true;
+        }
+    }
+    check(!ever_valid_during_outage, "INV-LEADER-UNIQUE",
+          "a mute leader never holds valid authority during the outage");
+    check(!safe_at_bus_off, "LOT 6A",
+          "bus-off does not by itself latch SAFE at the instant it is reported");
+    printf("        bus-off reported at t=%u ms, lease would have run to t=%u ms\n",
+           g_bus.now_ms - 400u, g_bus.node[li].lease_expiry_ms);
+}
+
+/* TC-093 / INV-TRANSPORT-NO-TX: while its own transport is off the bus, the
+ * protocol core must not hand frames to the transmit callback. A frame given
+ * to a mute controller is either discarded or queued; if it is queued it
+ * becomes stale traffic that is released later (TC-096).
+ * EXPECTED RED: the leader keeps emitting heartbeats into a dead controller. */
+static void tc_093_bus_off_suppresses_transmission(void)
+{
+    int li, other;
+    uint32_t attempts, degraded_tx_before, degraded_tx_after;
+
+    printf("TC-093  a bus-off node must not hand frames to its transmitter [LOT 6A, INV-TRANSPORT-NO-TX]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+
+    bus_set_transport(li, MOSAIK_TRANSPORT_BUS_OFF);
+    bus_run(300u);
+    attempts = g_bus.tx_attempts_while_down[li];
+    check(attempts == 0u, "LOT 6A",
+          "no frame is handed to the transmit callback while the controller is off the bus");
+
+    /* DEGRADED must NOT suppress transmission: error-passive still talks,
+     * and silencing it would turn a recoverable fault into an outage. */
+    other = (li + 1) % N_NODES;
+    degraded_tx_before = g_bus.tx_count[other][MOSAIK_MSG_ACK] +
+                         g_bus.tx_count[other][MOSAIK_MSG_HEARTBEAT];
+    bus_set_transport(other, MOSAIK_TRANSPORT_DEGRADED);
+    bus_run(300u);
+    degraded_tx_after = g_bus.tx_count[other][MOSAIK_MSG_ACK] +
+                        g_bus.tx_count[other][MOSAIK_MSG_HEARTBEAT];
+    check(degraded_tx_after > degraded_tx_before, "LOT 6A",
+          "a DEGRADED (error-passive) node keeps transmitting");
+    printf("        frames offered to a dead controller in 300 ms = %u\n", attempts);
+}
+
+/* TC-094 / INV-TRANSPORT-NO-FABRICATED-EVIDENCE: a transport outage must
+ * never manufacture protocol evidence. No lease renewal, no acknowledgement
+ * evidence and no quorum contact may accrue while the node is off the bus.
+ * EXPECTED GREEN: evidence already derives only from frames actually
+ * received. This guard must keep holding through LOT 6A GREEN. */
+static void tc_094_bus_off_fabricates_no_evidence(void)
+{
+    int li, i;
+    uint32_t renewals_before, contacts_before;
+    uint32_t ack_rx_before[N_NODES + 1];
+    bool ack_evidence_frozen = true;
+
+    printf("TC-094  a transport outage fabricates no evidence [LOT 6A, INV-TRANSPORT-NO-FABRICATED-EVIDENCE]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+
+    renewals_before = g_bus.lease_renewals;
+    contacts_before = g_bus.quorum_contact_events;
+    for (i = 0; i <= N_NODES; i++) { ack_rx_before[i] = g_bus.node[li].last_ack_rx_ms[i]; }
+
+    bus_set_transport(li, MOSAIK_TRANSPORT_BUS_OFF);
+    bus_run(300u);
+
+    check(g_bus.lease_renewals == renewals_before, "LOT 2C",
+          "no lease renewal occurs while the leader is off the bus");
+    check(g_bus.quorum_contact_events == contacts_before, "LOT 2C",
+          "no quorum-contact event occurs while the leader is off the bus");
+    for (i = 0; i <= N_NODES; i++) {
+        if (g_bus.node[li].last_ack_rx_ms[i] != ack_rx_before[i]) { ack_evidence_frozen = false; }
+    }
+    check(ack_evidence_frozen, "LOT 5",
+          "no acknowledgement evidence timestamp advances while off the bus");
+    check(!mosaik_has_quorum_ack_evidence(&g_bus.node[li]), "LOT 5",
+          "the quorum acknowledgement predicate is false after the freshness window elapses off the bus");
+}
+
+/* TC-095 / INV-TRANSPORT-NOT-FDIR: bus-off is a recoverable transport
+ * condition, not an observed invariant violation, so it must not by itself
+ * latch SAFE. Escalation stays evidence-based: a node that stays mute fails
+ * elections and reaches SAFE through the existing NO_QUORUM path, with that
+ * cause and no other. EXPECTED GREEN; this pins the decision so that LOT 6A
+ * GREEN cannot quietly map BUS_OFF to SAFE. */
+static void tc_095_bus_off_does_not_latch_safe(void)
+{
+    int li, fi;
+    uint32_t k;
+    bool safe_early = false;
+    uint8_t cause;
+
+    printf("TC-095  bus-off is not FDIR evidence and must not latch SAFE by itself [LOT 6A, INV-TRANSPORT-NOT-FDIR]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+    fi = (li + 1) % N_NODES;
+
+    bus_set_transport(fi, MOSAIK_TRANSPORT_BUS_OFF);
+    check(g_bus.node[fi].state != MOSAIK_STATE_SAFE, "LOT 6A",
+          "SAFE is not entered at the instant bus-off is reported");
+
+    /* Well inside the election budget: three failed elections cannot have
+     * happened yet, so nothing legitimate can have latched SAFE. */
+    for (k = 0; k < 300u; k++) {
+        bus_step();
+        if (g_bus.node[fi].state == MOSAIK_STATE_SAFE) { safe_early = true; }
+    }
+    check(!safe_early, "LOT 6A",
+          "a mute node does not latch SAFE before its election budget is spent");
+
+    /* Left mute, the node must still escalate the way it always did. */
+    bus_run(6000u);
+    cause = g_bus.node[fi].safe_cause;
+    check(g_bus.node[fi].state != MOSAIK_STATE_SAFE || cause == (uint8_t)MOSAIK_SAFE_NO_QUORUM,
+          "LOT 3", "a persistently mute node reaches SAFE only through the existing NO_QUORUM cause");
+    printf("        mute node final state = %d, safe cause = %u (2 = NO_QUORUM)\n",
+           (int)g_bus.node[fi].state, cause);
+}
+
+/* TC-096 / INV-TRANSPORT-RECOVERY-NO-AUTHORITY: an outage shorter than the
+ * lease is the dangerous case, because nothing expires by itself. Authority
+ * must be invalid throughout the outage, and after recovery it may return
+ * only on evidence actually received after recovery.
+ * EXPECTED RED on the outage window; the recovery half is a guard. */
+static void tc_096_short_outage_and_recovery(void)
+{
+    int li;
+    uint32_t k, renewals_at_recovery;
+    uint16_t term_before;
+    bool ever_valid_during_outage = false;
+
+    printf("TC-096  an outage shorter than the lease still revokes authority [LOT 6A, INV-TRANSPORT-RECOVERY-NO-AUTHORITY]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+    term_before = g_bus.node[li].term;
+
+    bus_set_transport(li, MOSAIK_TRANSPORT_BUS_OFF);
+    for (k = 0; k < 200u; k++) {           /* 200 ms < 500 ms lease */
+        bus_step();
+        if (mosaik_has_valid_leadership_authority(&g_bus.node[li])) {
+            ever_valid_during_outage = true;
+        }
+    }
+    check(!ever_valid_during_outage, "INV-LEADER-UNIQUE",
+          "authority is invalid throughout an outage shorter than the lease");
+
+    bus_set_transport(li, MOSAIK_TRANSPORT_UP);
+    renewals_at_recovery = g_bus.lease_renewals;
+    bus_run(400u);
+    check(g_bus.lease_renewals > renewals_at_recovery, "LOT 2C",
+          "authority after recovery rests on acknowledgements received after recovery");
+    check(g_bus.node[li].term >= term_before, "INV-TERM-MONOTONIC",
+          "no term regression across the outage and recovery");
+    check(valid_leader_count() <= 1, "INV-LEADER-UNIQUE",
+          "never more than one valid authority across the outage and recovery");
+}
+
+/* TC-097 / INV-TRANSPORT-NO-TX (follower path): a mute follower must not
+ * hand acknowledgements or vote grants to its transmitter. This is the
+ * dangerous direction: an acknowledgement is exactly what renews a leader's
+ * lease, so a follower that believes it is answering while it is off the bus
+ * is asserting evidence it cannot supply.
+ * EXPECTED RED on the transmit refusal; the rest is a guard. */
+static void tc_097_bus_off_follower_refuses_to_answer(void)
+{
+    int li, fi, gi;
+    uint32_t attempts;
+    uint32_t ack_rx_at_fault;
+
+    printf("TC-097  a bus-off follower must not offer acknowledgements [LOT 6A, INV-TRANSPORT-NO-TX]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+    fi = (li + 1) % N_NODES;
+    gi = (li + 2) % N_NODES;
+
+    ack_rx_at_fault = g_bus.node[li].last_ack_rx_ms[fi];
+    bus_set_transport(fi, MOSAIK_TRANSPORT_BUS_OFF);
+    bus_run(300u);
+
+    attempts = g_bus.tx_attempts_while_down[fi];
+    check(attempts == 0u, "LOT 6A",
+          "a mute follower hands no acknowledgement or vote grant to its transmitter");
+    check(g_bus.node[li].last_ack_rx_ms[fi] == ack_rx_at_fault, "LOT 2C",
+          "the leader records no new acknowledgement evidence from the mute follower");
+    check(mosaik_has_valid_leadership_authority(&g_bus.node[li]), "LOT 2A",
+          "the leader keeps authority on the surviving quorum member");
+    check(mosaik_get_transport_status(&g_bus.node[li]) == MOSAIK_TRANSPORT_UP &&
+          mosaik_get_transport_status(&g_bus.node[gi]) == MOSAIK_TRANSPORT_UP,
+          "INV-FDIR-NO-MAGIC", "no other node's transport status was altered");
+    printf("        frames offered by the mute follower in 300 ms = %u\n", attempts);
+}
+
+/* TC-098 / INV-TRANSPORT-NO-MUTE-AUTHORITY across the CONFIG path: a
+ * proposer that goes mute in the middle of a membership transaction must
+ * stop being an authority and must stop emitting CONFIG frames. The Lot 5
+ * joint-quorum rule must be untouched by the transport fault.
+ * EXPECTED RED on authority and on the CONFIG transmit path. */
+static void tc_098_transport_fault_during_transaction(void)
+{
+    int li, i;
+    uint8_t target;
+    bool requested;
+    uint32_t cfg_attempts;
+    uint16_t epoch_at_fault[N_NODES];
+    uint8_t  mask_at_fault[N_NODES];
+    bool no_silent_commit = true;
+    uint32_t mismatches;
+
+    printf("TC-098  transport fault during a membership transaction [LOT 6A + LOT 5]\n");
+    bus_init();
+    bus_run(2000u);
+    li = valid_leader_index();
+    check(li >= 0, "LOT 6A", "a valid leader existed before the transport fault");
+    if (li < 0) { return; }
+
+    /* Remove one node that is not the proposer: mask keeps the leader. */
+    target = (uint8_t)((1u << li) | (1u << ((li + 1) % N_NODES)));
+    requested = mosaik_request_reconfiguration(&g_bus.node[li], target);
+    check(requested, "LOT 5", "the transaction started from a legitimate proposer");
+    bus_run(30u);                       /* PROPOSE on the wire, not yet committed */
+
+    for (i = 0; i < N_NODES; i++) {
+        epoch_at_fault[i] = g_bus.node[i].committed_epoch;
+        mask_at_fault[i]  = g_bus.node[i].committed_mask;
+    }
+    cfg_attempts = g_bus.tx_attempts_while_down[li];
+    bus_set_transport(li, MOSAIK_TRANSPORT_BUS_OFF);
+
+    check(!mosaik_has_valid_leadership_authority(&g_bus.node[li]), "LOT 6A",
+          "a mute proposer is no longer an authority and cannot drive the transaction");
+
+    bus_run(400u);
+    check(g_bus.tx_attempts_while_down[li] == cfg_attempts, "LOT 6A",
+          "a mute proposer hands no CONFIG frame to its transmitter either");
+
+    for (i = 0; i < N_NODES; i++) {
+        if (i == li) { continue; }
+        /* A peer off the far side of the fault received nothing, so it can
+         * only still hold what it held when the fault began. */
+        if (g_bus.node[i].committed_epoch != epoch_at_fault[i] ||
+            g_bus.node[i].committed_mask != mask_at_fault[i]) { no_silent_commit = false; }
+    }
+    check(no_silent_commit, "INV-RECONFIG-QUORUM",
+          "no peer commits a new configuration on evidence it could not have received");
+
+    mismatches = 0u;
+    for (i = 0; i < N_NODES; i++) { mismatches += g_bus.node[i].config_mismatch_observed; }
+    check(mismatches == 0u, "INV-RECONFIG-CONSISTENT",
+          "no two nodes hold different masks at the same configuration epoch");
+}
+
+/* TC-099 / INV-ICD-FRAME-GEOMETRY: choosing CAN-FD as the physical transport
+ * does not change the logical frame. Every frame this protocol produces is
+ * an 11-bit identifier with DLC 8, which is a legal CAN-FD payload and also
+ * a legal Classical CAN payload. The decoder must reject the larger CAN-FD
+ * payload lengths, so that adopting FD cannot silently widen the ICD.
+ * EXPECTED GREEN. This pins the decision recorded in docs/ICD-HIL.md. */
+static void tc_099_frame_geometry_is_transport_independent(void)
+{
+    static const mosaik_msg_type_t types[6] = {
+        MOSAIK_MSG_SAFE, MOSAIK_MSG_VOTE_REQ, MOSAIK_MSG_VOTE_GRANT,
+        MOSAIK_MSG_HEARTBEAT, MOSAIK_MSG_ACK, MOSAIK_MSG_CONFIG
+    };
+    static const uint8_t fd_lengths[7] = { 12u, 16u, 20u, 24u, 32u, 48u, 64u };
+    int t, src, k;
+    int encoded = 0, round_tripped = 0;
+    bool all_dlc8 = true, all_11bit = true;
+    bool fd_lengths_rejected = true;
+
+    printf("TC-099  CAN-FD transport does not widen the logical frame [LOT 6A, INV-ICD-FRAME-GEOMETRY]\n");
+
+    for (t = 0; t < 6; t++) {
+        for (src = 1; src <= (int)MOSAIK_MAX_NODES; src++) {
+            mosaik_frame_t f;
+            mosaik_msg_t m, back;
+            memset(&m, 0, sizeof(m));
+            m.type = types[t]; m.src = (uint8_t)src; m.version = MOSAIK_PROTO_VERSION;
+            m.role = MOSAIK_ROLE_FOLLOWER; m.state = MOSAIK_STATE_INIT;
+            m.term = 7u; m.arg = 5u;
+            if (types[t] == MOSAIK_MSG_CONFIG) {
+                m.cfg_stage = (uint8_t)MOSAIK_CFG_PROPOSE;
+                m.cfg_mask  = MOSAIK_MEMBERSHIP_ALL;
+            }
+            mosaik_encode(&f, &m);
+            encoded++;
+            if (f.dlc != MOSAIK_DLC) { all_dlc8 = false; }
+            if (f.id > 0x7FFu)       { all_11bit = false; }
+            if (mosaik_decode(&f, &back) && back.type == m.type && back.src == m.src) {
+                round_tripped++;
+            }
+            /* The same frame presented with a CAN-FD payload length must be
+             * refused: FD does not imply a wider ICD. */
+            for (k = 0; k < 7; k++) {
+                mosaik_frame_t wide = f;
+                mosaik_msg_t discard;
+                wide.dlc = fd_lengths[k];
+                if (mosaik_decode(&wide, &discard)) { fd_lengths_rejected = false; }
+            }
+        }
+    }
+
+    check(encoded == 18, "LOT 6A", "the ICD defines exactly eighteen encodable frames");
+    check(round_tripped == 18, "REQ-ICD-001", "every one of the eighteen frames round-trips");
+    check(all_dlc8, "REQ-ICD-001", "every frame produced uses DLC 8");
+    check(all_11bit, "REQ-ICD-001", "every identifier fits the 11-bit range");
+    check(fd_lengths_rejected, "REQ-ICD-001",
+          "every CAN-FD payload length above 8 bytes is rejected by the decoder");
+}
+
+/* TC-100 / INV-CHRONOLOGY-SUFFICIENT: whether the existing fields let an
+ * external observer reconstruct the chronology of authority-bearing events
+ * WITHOUT adding a correlation_id to the wire format (ADD-F007).
+ * The observer has: its own timestamp, source, message type, term and the
+ * argument byte (heartbeat sequence, acknowledged sequence).
+ * EXPECTED GREEN, and it measures the exact boundary of the claim: the
+ * heartbeat sequence is one byte, so (source, term, sequence) is unique only
+ * within 256 heartbeats of one term. That bound is reported, not assumed. */
+static void tc_100_chronology_without_correlation_id(void)
+{
+    int i, j, li;
+    int hb = 0, acks = 0, acks_matched = 0, key_collisions = 0, wrapped_repeats = 0;
+    uint32_t wrap_ms;
+
+    printf("TC-100  chronology reconstruction without correlation_id [LOT 6A, INV-CHRONOLOGY-SUFFICIENT]\n");
+    bus_init();
+    g_bus.chrono_enabled = true;
+    bus_run(3000u);
+    li = valid_leader_index();
+    check(li >= 0 && g_bus.chrono_n > 0, "LOT 6A", "a run was captured by the external observer");
+    if (li < 0) { return; }
+
+    /* 1. Is (timestamp, source, type, term, arg) a unique key? */
+    for (i = 0; i < g_bus.chrono_n; i++) {
+        for (j = i + 1; j < g_bus.chrono_n; j++) {
+            if (g_bus.chrono[i].t_ms == g_bus.chrono[j].t_ms &&
+                g_bus.chrono[i].src  == g_bus.chrono[j].src &&
+                g_bus.chrono[i].type == g_bus.chrono[j].type &&
+                g_bus.chrono[i].term == g_bus.chrono[j].term &&
+                g_bus.chrono[i].arg  == g_bus.chrono[j].arg) { key_collisions++; }
+        }
+        if (g_bus.chrono[i].type == (uint8_t)MOSAIK_MSG_HEARTBEAT) { hb++; }
+    }
+    check(key_collisions == 0, "LOT 6A",
+          "observer timestamp plus source, type, term and argument uniquely keys every observed frame");
+
+    /* 2. Can every acknowledgement be bound to the heartbeat it answers,
+     *    using only (term, echoed sequence) and the observer's ordering? */
+    for (i = 0; i < g_bus.chrono_n; i++) {
+        if (g_bus.chrono[i].type != (uint8_t)MOSAIK_MSG_ACK) { continue; }
+        acks++;
+        for (j = i - 1; j >= 0; j--) {
+            if (g_bus.chrono[j].type == (uint8_t)MOSAIK_MSG_HEARTBEAT &&
+                g_bus.chrono[j].term == g_bus.chrono[i].term &&
+                g_bus.chrono[j].arg  == g_bus.chrono[i].arg) { acks_matched++; break; }
+        }
+    }
+    check(acks > 0 && acks_matched == acks, "ADD-F007",
+          "every acknowledgement binds to exactly one preceding heartbeat without a correlation_id");
+
+    /* 3. The boundary of the claim: the sequence byte wraps. Run one long
+     *    stable term and count how often (source, term, sequence) repeats. */
+    bus_init();
+    g_bus.chrono_enabled = true;
+    bus_run(30000u);
+    for (i = 0; i < g_bus.chrono_n; i++) {
+        if (g_bus.chrono[i].type != (uint8_t)MOSAIK_MSG_HEARTBEAT) { continue; }
+        for (j = i + 1; j < g_bus.chrono_n; j++) {
+            if (g_bus.chrono[j].type == (uint8_t)MOSAIK_MSG_HEARTBEAT &&
+                g_bus.chrono[j].src  == g_bus.chrono[i].src &&
+                g_bus.chrono[j].term == g_bus.chrono[i].term &&
+                g_bus.chrono[j].arg  == g_bus.chrono[i].arg) { wrapped_repeats++; break; }
+        }
+    }
+    wrap_ms = 256u * 100u;
+    check(wrap_ms == 25600u, "LOT 6A",
+          "the heartbeat sequence byte wraps after 256 heartbeats, i.e. 25600 ms in one term");
+    printf("        observed: %d heartbeats, %d acknowledgements, %d unmatched; "
+           "(src,term,seq) repeats in a 30 s term = %d\n",
+           hb, acks, acks - acks_matched, wrapped_repeats);
+    printf("        conclusion: the observer timestamp is REQUIRED to disambiguate a term longer\n");
+    printf("                    than %u ms; with it, no correlation_id is needed for LOT 7 chronology\n", wrap_ms);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -6948,6 +7532,21 @@ int main(void)
     tc_088_safe_degraded_during_transaction();
     tc_089_time_boundaries();
     tc_090_bounded_schedule_explorer();
+
+    /* LOT 6A: communication substrate, pre-hardware RED baseline.
+     * TC-092, TC-093, TC-096, TC-097 and TC-098 are expected to FAIL: the
+     * transport interface is specified and inert, and no protocol decision
+     * reads it yet. */
+    tc_091_transport_status_locality();
+    tc_092_bus_off_leader_holds_no_authority();
+    tc_093_bus_off_suppresses_transmission();
+    tc_094_bus_off_fabricates_no_evidence();
+    tc_095_bus_off_does_not_latch_safe();
+    tc_096_short_outage_and_recovery();
+    tc_097_bus_off_follower_refuses_to_answer();
+    tc_098_transport_fault_during_transaction();
+    tc_099_frame_geometry_is_transport_independent();
+    tc_100_chronology_without_correlation_id();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);

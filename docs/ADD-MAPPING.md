@@ -43,9 +43,9 @@
 | 10 / 82 | REQ-PERF-0001 / REQ-PERF-001 | Election completion < 1000 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-003 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Simulated time only |
 | 10 / 82 | REQ-PERF-0002 / REQ-PERF-002 | SAFE latch < 10 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-004 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Host receive path |
 | 10 | REQ-PERF-0003 | Heartbeat period 100 ms ± tolerance | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` | TC-001 | PROTOCOL.md §6 | 1 | IMPLEMENTED-SIM | Configured; not measured; derived: 10 Hz ±2% (ADD-F010) |
-| 10 | REQ-PERF-0004 | CAN-FD 500k/2M bit/s | L3: drv_canfd | NOT IMPLEMENTED | — | — | 6 | HARDWARE-REQUIRED | Requires STM32H743 FDCAN; protocol model compatible — see ADD-F004 |
+| 10 | REQ-PERF-0004 | CAN-FD 500k/2M bit/s | L3: drv_canfd | NOT IMPLEMENTED | — | — | 6 | HARDWARE-REQUIRED | Requires a CAN-FD controller on the chosen bench platform (`ROADMAP.md` §4.2 — the MCU is substitutable, not an ADD conformity obligation); PLANNED and UNVALIDATED, LOT 6B; protocol model compatible — see ADD-F004 |
 | 10 | REQ-ENV-0001 | LEO thermal/vibration/radiation | L0-L6: all | NOT IMPLEMENTED | — | — | 13-14 | HARDWARE-REQUIRED | Flight hardware required; no environmental qualification (ADD-F005) |
-| 10 | REQ-IF-0001 | CAN-FD primary backbone ICD | L3: drv_canfd, L4: svc_mosaik_proto | `firmware/core/mosaik_proto.c/h` (frame format) | TC-006 | PROTOCOL.md | 1 | PARTIAL | Frame format defined; FD not validated (ADD-F004) |
+| 10 | REQ-IF-0001 | CAN-FD primary backbone ICD (HIL subset specified in `docs/ICD-HIL.md`, LOT 6A) | L3: drv_canfd, L4: svc_mosaik_proto | `firmware/core/mosaik_proto.c/h` (frame format) | TC-006 | PROTOCOL.md | 1 | PARTIAL | Frame format defined; FD not validated (ADD-F004) |
 | 10 | REQ-IF-0002 | Ethernet secondary | L3: drv_eth | NOT IMPLEMENTED | — | — | 6 | DESIGN-ONLY | |
 | 10 | REQ-IF-0003 | Wired safety discretes | L3: drv_gpio, L5: Safety_Task | NOT IMPLEMENTED | — | — | 11 | DESIGN-ONLY | Software SAFE only (ADD-F009); LOT 3 documented the gap, no software substitute |
 | 10 | REQ-IF-0004 | 24V distributed power | L2: BSP power | NOT IMPLEMENTED | — | — | 13 | NOT-STARTED | |

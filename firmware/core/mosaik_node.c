@@ -319,6 +319,12 @@ void mosaik_init(mosaik_node_t *node, uint8_t id, const mosaik_config_t *cfg,
     node->safe_entry_ms = 0u;
     node->safe_trigger_ms = 0u;
     node->decode_errors = 0u;
+
+    /* LOT 6A. A cold restart re-initialises the CAN controller, which
+     * re-enters error-active, so UP is the correct boot value. */
+    node->transport_status         = (uint8_t)MOSAIK_TRANSPORT_UP;
+    node->transport_status_ms      = now_ms;
+    node->transport_status_changes = 0u;
     node->last_quorum_contact_ms = now_ms;
     node->lease_expiry_ms = now_ms;
     node->stale_term_rejections = 0u;
@@ -847,6 +853,41 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
         return;
     }
     start_election(node);
+}
+
+/* LOT 6A: local transport status reporting.
+ *
+ * RED BASELINE. These three functions are the complete LOT 6A transport
+ * interface and they are deliberately INERT: the status is recorded and can
+ * be read back, and NOTHING in emit(), emit_config(), mosaik_on_rx(),
+ * mosaik_tick() or mosaik_has_valid_leadership_authority() consults it.
+ * A bus-off node therefore still hands frames to its transmit callback and
+ * still reports valid leadership authority until its lease expires. That is
+ * the defect TC-092, TC-093, TC-096, TC-097 and TC-098 capture. Correcting
+ * it is LOT 6A GREEN and is NOT part of this commit. */
+void mosaik_set_transport_status(mosaik_node_t *node, uint32_t now_ms,
+                                 mosaik_transport_status_t status)
+{
+    if (node == NULL) {
+        return;
+    }
+    node->now_ms = now_ms;
+    if (node->transport_status != (uint8_t)status) {
+        node->transport_status_changes++;
+    }
+    node->transport_status    = (uint8_t)status;
+    node->transport_status_ms = now_ms;
+}
+
+mosaik_transport_status_t mosaik_get_transport_status(const mosaik_node_t *node)
+{
+    return (mosaik_transport_status_t)node->transport_status;
+}
+
+bool mosaik_transport_can_transmit(const mosaik_node_t *node)
+{
+    return node->transport_status != (uint8_t)MOSAIK_TRANSPORT_BUS_OFF &&
+           node->transport_status != (uint8_t)MOSAIK_TRANSPORT_RECOVERING;
 }
 
 bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node)

@@ -31,7 +31,7 @@
 | **Safety Discretes** | Wired GPIO | DC / low frequency | Hard safety signals | All nodes → CN, GSE |
 | **Power** | 24 V distributed | DC | Node power with individual enables | All nodes |
 
-**Note:** CAN-FD bitrates per ADD Section 3. Current bench uses 500 kbit/s arbitration only (Classical CAN compatible). See ADD-F004.
+**Note:** CAN-FD bitrates per ADD Section 3. The bench has **no physical bus at all**: its frames exist only on a host virtual bus. Its *planned* physical configuration is CAN-FD at 500 kbit/s arbitration and 2 Mbit/s data, PLANNED and UNVALIDATED (`docs/ICD-HIL.md` §5). The logical frame — 11-bit identifier, DLC 8 — is transport-independent and is not widened by adopting FD (`docs/ICD-HIL.md` §5.1). See ADD-F004, which remains open.
 
 ---
 
