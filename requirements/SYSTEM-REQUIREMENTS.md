@@ -30,12 +30,12 @@ The ADD contains at least two requirement naming schemes:
 | REQ-FUNC-0002 | Major reconfiguration requires formal majority quorum | CbD, CbT | PARTIAL (IMPLEMENTED-SIM) | LOT2A: quorum=2 for 3-node | 3-node subset only; GSE voting role TBC — see ADD-F008 |
 | REQ-FUNC-0003 | Heartbeat nominal period 100 ms | CbT | IMPLEMENTED-SIM | LOT1: TC-006 (period), TC-001 | Host sim only; derived tolerance ±2% — see ADD-F010 |
 | REQ-FUNC-0004 | Leader loss detection and re-election < 1 s | CbT | IMPLEMENTED-SIM | LOT2A: TC-003 (452 ms sim); LOT2D: TC-028 (628 ms sim), TC-031 (680 ms sim, after one split vote) | Simulated time only; not a worst-case bound |
-| REQ-FUNC-0005 | Mission remains useful after loss of one EN in DEGRADED mode | CbA, CbT | DESIGN-ONLY | — | 6-node architecture required |
+| REQ-FUNC-0005 | Mission remains useful after loss of one EN in DEGRADED mode | CbA, CbT | DESIGN-ONLY | — | 6-node architecture required — deferred to MOSAÏK Advanced |
 | REQ-FUNC-0006 | Mode transitions and critical decisions must generate logged events | CbD, CbT | DESIGN-ONLY | — | Logger service LOT 7 |
 | REQ-FUNC-0007 | Critical CAN messages include CRC and correlation_id | CbD, CbT | PARTIAL | LOT1: TC-006 (CRC) | correlation_id not yet implemented — see ADD-F007 |
-| REQ-FUNC-0008 | CN maintains an authoritative cluster blackbox | CbD, CbT | DESIGN-ONLY | — | CN node LOT 8 |
-| REQ-FUNC-0009 | COMN exports consolidated logs to GSE | CbD, CbT | DESIGN-ONLY | — | COMN node LOT 8 |
-| REQ-FUNC-0010 | Complete event timeline reconstruction | CbA, CbT | DESIGN-ONLY | — | Requires blackbox + GSE |
+| REQ-FUNC-0008 | CN maintains an authoritative cluster blackbox | CbD, CbT | DESIGN-ONLY | — | CN node — deferred to MOSAÏK Advanced |
+| REQ-FUNC-0009 | COMN exports consolidated logs to GSE | CbD, CbT | DESIGN-ONLY | — | COMN node — deferred to MOSAÏK Advanced |
+| REQ-FUNC-0010 | Complete event timeline reconstruction | CbA, CbT | DESIGN-ONLY | — | ADD-level reconstruction requires blackbox + GSE, deferred to MOSAÏK Advanced; the bench's own run chronology is LOT 7 (`ROADMAP.md` §6.2) |
 
 ### 2.2 Safety Requirements (REQ-SAFE)
 
@@ -77,7 +77,7 @@ The ADD contains at least two requirement naming schemes:
 |----|------------------------|---------------------|-------------|-----------------|-------|
 | REQ-LOG-0001 | All mode transitions logged with timestamp | CbD, CbT | DESIGN-ONLY | — | LOT 7 |
 | REQ-LOG-0002 | All critical decisions logged with correlation_id | CbD, CbT | DESIGN-ONLY | — | LOT 7; correlation_id not yet in wire format — see ADD-F007 |
-| REQ-LOG-0003 | Blackbox survives node restart | CbD, CbT | DESIGN-ONLY | — | LOT 8 |
+| REQ-LOG-0003 | Blackbox survives node restart | CbD, CbT | DESIGN-ONLY | — | CN-authoritative blackbox deferred to MOSAÏK Advanced; LOT 7 covers only the HIL run-evidence persistence the bench needs |
 
 ---
 

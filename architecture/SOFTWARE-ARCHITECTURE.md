@@ -86,15 +86,17 @@
 
 ## 7. Current Host Demonstrator vs. Target Architecture
 
-| Layer | Target (ADD) | Current Repository | Gap |
+**Reading note.** This table records the **delta** between the ADD target software architecture and what this bench implements. It is a description, not a work list for this repository. `mosaik-hil-bench` is an experimental HIL bench; building the complete layered architecture — the full driver and service sets, the RTOS task set and the mission modules — belongs to the separate future project MOSAÏK Advanced. This repository implements only what the HIL experiment needs (`ROADMAP.md` §2, §4, §6).
+
+| Layer | Target (ADD) | Current Repository | Delta (informative) |
 |-------|--------------|-------------------|-----|
 | L0 Startup | STM32H743 boot | `main()` in test harness | Complete redesign |
 | L1 HAL | STM32 HAL/LL | None (host libc) | Full port |
 | L2 BSP | Board-specific | None | Board bring-up |
 | L3 Drivers | 7 drivers | None (virtual CAN bus) | All drivers |
-| L4 Services | 5 services | `svc_mosaik_proto` only (host) | 4 services |
+| L4 Services | 5 services | `svc_mosaik_proto` only (host) | 4 services; the bench adds only the time, logging and health services its run chronology needs (LOT 7, `ROADMAP.md` §6.2) |
 | L5 RTOS Tasks | 6 tasks | Single-threaded sim loop | FreeRTOS port |
-| L6 Mission | 3 modules | None | All modules |
+| L6 Mission | 3 modules | None | Mission modules — MOSAÏK Advanced. The bench introduces only a minimal experimental function abstraction, for redistribution testing (LOT 8, `ROADMAP.md` §6.3) |
 
 **Critical distinction:** The current repository implements **only** `svc_mosaik_proto` (protocol + node state machine) as a **host-hosted, single-threaded, deterministic simulation**. It does not contain any STM32, FreeRTOS, or hardware-specific code.
 
@@ -137,11 +139,13 @@ L0 Startup ◄── Vector table, clock tree, bootloader
 4. **Persistence:** Add `svc_fs` for term/vote persistence across reset — NOT implemented. The LOT 2D host demonstrator restarts cold through `mosaik_init()` and loses all volatile term/vote state by design (see `LOT2D_CRASH_RECOVERY_REPORT.md` §3, §13); a target Lot for persistence is not yet assigned
 5. **Discretes:** Implement `Safety_Task` reading/wiring GPIO for SAFE_ASSERT, etc.
 6. **Memory:** Static allocation only; no heap after init (LOT 10 verification)
-7. **Determinism:** Preserve deterministic RNG for reproducible tests; add hardware entropy for flight
+7. **Determinism:** Preserve deterministic RNG for reproducible tests. Reproducibility is a HIL requirement (`ROADMAP.md` §6.1); any hardware-entropy source for a flight build is a MOSAÏK Advanced concern
 
 ---
 
 ## 10. Compliance Statement
 
 **This document describes the TARGET ADD ARCHITECTURE.**  
-The current repository implements a **host demonstrator** covering only a subset of `svc_mosaik_proto` and `Cluster_Task` logic. No claim is made that STM32/FreeRTOS/HIL code exists. All target modules are DESIGN-ONLY until implemented in subsequent Lots.
+The current repository implements a **host demonstrator** covering only a subset of `svc_mosaik_proto` and `Cluster_Task` logic. No claim is made that STM32/FreeRTOS/HIL code exists. All target modules are DESIGN-ONLY here.
+
+**This document is an architectural reference, not an obligation on this repository.** DESIGN-ONLY does not mean "scheduled for implementation in `mosaik-hil-bench`". The HIL bench implements only what its experimental objective requires; the complete ADD software architecture is the scope of the separate future project MOSAÏK Advanced. See `ROADMAP.md` §2.

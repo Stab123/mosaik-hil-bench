@@ -27,15 +27,36 @@ consensus from FDIR evidence in the four-state local mode model: starting an
 election no longer degrades a node, and a SAFE announcement's term is no
 longer adopted as a consensus epoch (see `LOT4_MODE_SEMANTICS_REPORT.md`).
 
-This repository is a deterministic experimental protocol and verification
-bench. It is not the complete MOSAÏK ADD implementation; that is planned as a
-separate project, MOSAÏK Advanced. Lot 5 replaces the fixed membership with an
-explicit committed membership mask carrying its own configuration epoch, changed
-only by a PROPOSE/ACCEPT/COMMIT transaction that requires a quorum of the old and
-of the new configuration (see `LOT5_RECONFIGURATION_REPORT.md`).
+Lot 5 replaces the fixed membership with an explicit committed membership mask
+carrying its own configuration epoch, changed only by a PROPOSE/ACCEPT/COMMIT
+transaction that requires a quorum of the old and of the new configuration (see
+`LOT5_RECONFIGURATION_REPORT.md`).
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
+
+## Scope boundary
+
+This repository is a **deterministic experimental protocol and verification
+bench**: a platform used to discover, reproduce, measure and validate
+distributed autonomy and fault-tolerance behaviour.
+
+It is **not** the complete MOSAÏK ADD implementation, and it is not required to
+become one. The complete ADD-driven architecture — the full EN/CN/COMN node set,
+the six-mode model including ADAPTIVE and PGA, the flight architecture and the
+mission software — is planned as a **separate future project, MOSAÏK Advanced**.
+
+The ADD remains this project's architectural parent and the source of its
+hypotheses, requirements and findings, but the bench is free to deviate from it
+where an experiment justifies the deviation; such deviations are recorded as
+results, not treated as defects. The bench converges instead toward one
+reproducible, instrumented, adversarial end-to-end experiment — healthy start,
+leader kill, re-election, second loss, membership reconfiguration, function
+redistribution, partition, refusal of an unsafe decision, SAFE where the safety
+contract requires it, network heal, reconciliation, and full chronology
+reconstruction from recorded evidence. That objective, the HIL/Advanced split
+and the knowledge-transfer path between the two are defined in `ROADMAP.md`
+sections 2, 4, 6 and 11.
 
 ## What this repository demonstrates
 

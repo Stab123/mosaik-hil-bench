@@ -17,7 +17,7 @@
 | **GitHub Implementation** | File(s) or "NOT IMPLEMENTED" |
 | **Test** | Repository test case(s) |
 | **Evidence** | Evidence reference / classification |
-| **LOT** | Development Lot |
+| **LOT** | Development Lot of this repository. **Adv** = deferred to MOSAÏK Advanced, the separate future ADD-driven project; see `ROADMAP.md` §2. |
 | **Status** | IMPLEMENTED-SIM / PARTIAL / DESIGN-ONLY / NOT-STARTED / HARDWARE-REQUIRED / TBC |
 | **Gap / Limitation** | Known limitations, simulation-only, missing scope |
 
@@ -31,12 +31,12 @@
 | 10 / 82 | REQ-FUNC-0002 / REQ-FUN-002 | Quorum required for reconfiguration | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (quorum func) | TC-005, TC-007 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | 3-node quorum=2 only; not universal proof; GSE voting role TBC (ADD-F008) |
 | 10 / 82 | REQ-FUNC-0003 / REQ-FUN-003 | Heartbeat nominal period 100 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (heartbeat_period_ms=100) | TC-001, TC-006 | PROTOCOL.md §6 | 1 | IMPLEMENTED-SIM | Period configured; not measured on hardware; derived tolerance ±2% (ADD-F010) |
 | 10 / 82 | REQ-FUNC-0004 / REQ-PERF-001 | Leader loss detection & re-election < 1 s | L4: svc_mosaik_proto, L5: Cluster_Task | `firmware/core/mosaik_node.c` (election timeout) | TC-003 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Simulated time (452 ms); no hardware measurement |
-| 10 | REQ-FUNC-0005 | Mission useful after 1 EN loss in DEGRADED | L6: mission modules, L5: Cluster_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | Requires 6-node architecture |
+| 10 | REQ-FUNC-0005 | Mission useful after 1 EN loss in DEGRADED | L6: mission modules, L5: Cluster_Task | NOT IMPLEMENTED | — | — | Adv | DESIGN-ONLY | Requires 6-node architecture — deferred to MOSAÏK Advanced |
 | 10 | REQ-FUNC-0006 | Mode transitions & critical decisions logged | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | 7 | DESIGN-ONLY | Logger service not implemented |
 | 10 / 82 | REQ-FUNC-0007 / REQ-ICD-001, REQ-ICD-002 | Critical CAN msgs: CRC + correlation_id | L3: drv_canfd, L4: svc_mosaik_proto | `firmware/core/mosaik_proto.c` (CRC-8) | TC-006 | PROTOCOL.md §5 | 1 | PARTIAL | CRC-8 implemented; correlation_id NOT implemented (ADD-F007) |
-| 10 | REQ-FUNC-0008 | CN maintains cluster blackbox | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | CN node not implemented |
-| 10 | REQ-FUNC-0009 | COMN exports logs to GSE | L4: svc_tm, L5: Companion_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | COMN node not implemented |
-| 10 | REQ-FUNC-0010 | Complete event timeline reconstruction | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | 8 | DESIGN-ONLY | Requires blackbox + GSE |
+| 10 | REQ-FUNC-0008 | CN maintains cluster blackbox | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | Adv | DESIGN-ONLY | CN node not implemented — deferred to MOSAÏK Advanced |
+| 10 | REQ-FUNC-0009 | COMN exports logs to GSE | L4: svc_tm, L5: Companion_Task | NOT IMPLEMENTED | — | — | Adv | DESIGN-ONLY | COMN node not implemented — deferred to MOSAÏK Advanced |
+| 10 | REQ-FUNC-0010 | Complete event timeline reconstruction | L4: svc_logger, L5: Logger_Task | NOT IMPLEMENTED | — | — | Adv / 7 | DESIGN-ONLY | ADD-level reconstruction requires blackbox + GSE (MOSAÏK Advanced); the bench run chronology is LOT 7 |
 | 10 / 82 | REQ-SAFE-0002 / REQ-SAF-001 | Split-brain detection & latch < 10 ms | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (enter_safe) | TC-004 | LOT2A_LEADER_LEASE_REPORT.md | 2A | IMPLEMENTED-SIM | Host receive path (0 ms sim); no hardware measurement |
 | 10 / 82 | REQ-SAFE-0003 / REQ-SAF-002 | SAFE irreversible without ground arbitration | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE latch, receive and service gates) | TC-004, TC-005; TC-035–TC-037, TC-041 | LOT2A_LEADER_LEASE_REPORT.md; LOT3_FDIR_SAFE_REPORT.md §6 | 2A, 3 | IMPLEMENTED-SIM | Software latch within one powered node instance; cold restart clears it; no PGA (ADD-F009) |
 | 10 / 82 | REQ-SAFE-0004 / REQ-SAF-003 | DEGRADED on peer SAFE | L4: svc_mosaik_proto | `firmware/core/mosaik_node.c` (SAFE handler evidence, heartbeat/leader state decision, DEGRADED exit) | TC-039, TC-040 (first executable evidence); TC-045, TC-047, TC-048 | LOT3_FDIR_SAFE_REPORT.md §7–§10 | 3 | IMPLEMENTED-SIM | TC-004 asserts SAFE/split-brain only and is not evidence for this row; exit/freshness semantics are a host interpretation (ADD-F011) |

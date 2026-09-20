@@ -80,16 +80,18 @@
 
 ## 6. Current Host Demonstrator vs. ADD Architecture
 
-| Aspect | ADD V1 (Target) | Current Repository (Host Sim) | Gap |
+**Reading note.** This table records the **delta** between the ADD reference architecture and what this bench implements. It is a description, not a work list: this repository is an experimental HIL bench and is **not** required to converge structurally to the ADD. Deltas that amount to building the complete architecture — the EN/CN/COMN/GSE node set, the six-mode model, power control, flight-representative hardware — are deferred to MOSAÏK Advanced. See `ROADMAP.md` §2.
+
+| Aspect | ADD V1 (Target) | Current Repository (Host Sim) | Delta (informative) |
 |--------|-----------------|-------------------------------|-----|
-| Nodes | 6 (3 EN, CN, COMN, GSE) | 3 generic coordination nodes | 3 EN, CN, COMN, GSE missing |
+| Nodes | 6 (3 EN, CN, COMN, GSE) | 3 generic coordination nodes | Node set differs by design — MOSAÏK Advanced |
 | CAN-FD | 500k/2M bit/s, FD frames | Classical CAN 2.0B, 500k arbitration | FD data phase, bitrate |
 | Ethernet | Secondary backbone | Not implemented | LOT 6 |
 | Safety discretes | 5 wired signals | Software-only SAFE latch (LOT 3 SAFE contract; no software discrete substitute) | LOT 11 |
-| Power control | 24V distributed with enables | Not implemented | LOT 13 |
-| System modes | 6 (INIT, NOM, ADAP, DEG, SAFE, PGA) | 4 (INIT, NOM, DEG, SAFE) | ADAPTIVE, PGA missing |
+| Power control | 24V distributed with enables | Not implemented | MOSAÏK Advanced (bench hardware needs only what LOT 13 requires) |
+| System modes | 6 (INIT, NOM, ADAP, DEG, SAFE, PGA) | 4 (INIT, NOM, DEG, SAFE) | ADAPTIVE and PGA are ADD modes — MOSAÏK Advanced (ADD-F003, ADD-F009) |
 | Leadership lease | 500 ms (target) | 500 ms (simulated) | LOT 2A host only |
-| Blackbox logging | CN-authoritative | Not implemented | LOT 7, 8 |
+| Blackbox logging | CN-authoritative | Not implemented | CN-authoritative blackbox — MOSAÏK Advanced; HIL run chronology — LOT 7 |
 | Time sync | IEEE 1588 / CAN sync | Simulated monotonic clock | LOT 6, 11 |
 
 ---
