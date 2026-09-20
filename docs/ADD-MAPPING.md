@@ -1,7 +1,7 @@
 # MOSAÏK ADD-to-Implementation Mapping
 
 **Document:** MOSAIK-ADD-MAP-001  
-**Issue:** 1.2 — 17 September 2026  
+**Issue:** 1.3 — 20 September 2026  
 **Purpose:** Master implementation map linking ADD requirements to architecture, code, tests, and evidence
 
 ---
@@ -120,14 +120,30 @@
 
 ---
 
-## 8. Evidence Classification Reference
+## 8. LOT 5 Specific Mapping (Autonomous Reconfiguration)
+
+| ADD Ref | Feature | Implementation | Test | Evidence | Status | Limitation |
+|---------|---------|----------------|------|----------|--------|------------|
+| REQ-FUNC-0002 (ADD-F008) | Voting membership made explicit: committed membership mask with its own configuration epoch; quorum `popcount(mask)/2+1` | `mosaik_node.c`: `quorum_of()`, `mosaik_effective_members()`, committed/accepted state | TC-061, TC-064, TC-076 | LOT5_RECONFIGURATION_REPORT.md §9–§14 | IMPLEMENTED-SIM | Three-node HIL interpretation; ADD target voting membership still open (ADD-F008) |
+| REQ-FUNC-0002 | Membership change as a distributed transaction: PROPOSE, ACCEPT, COMMIT, ANNOUNCE on identifiers `0x281`–`0x283` | `mosaik_proto.c` codec; `mosaik_node.c`: `handle_config()`, `mosaik_request_reconfiguration()` | TC-064, TC-072, TC-074, TC-076 | LOT5_RECONFIGURATION_REPORT.md §11 | IMPLEMENTED-SIM | No prepare-and-adopt recovery phase; a deadlocked epoch needs an operator |
+| — (HIL-derived) | Joint authorisation: a quorum of the old **and** of the new configuration | `mosaik_node.c`: commit test in `handle_config()` | TC-065, TC-068, TC-074, TC-081 | LOT5_RECONFIGURATION_REPORT.md §7, §14 | IMPLEMENTED-SIM | Counterexample analysis on three nodes, not a proof |
+| REQ-FUNC-0001 | Membership-aware elections and lease evidence | `mosaik_node.c`: membership gate in `mosaik_on_rx()`, `mosaik_has_quorum_ack_evidence()` | TC-069, TC-075, TC-087, TC-089 | LOT5_RECONFIGURATION_REPORT.md §16–§17 | IMPLEMENTED-SIM | Freshness boundary measured at 99/100 ms in simulated time |
+| — (HIL-derived) | Removed-node exclusion without conflating removal with FDIR | membership gate; `config_commit()` | TC-066, TC-075, TC-083, TC-084 | LOT5_RECONFIGURATION_REPORT.md §18–§19 | IMPLEMENTED-SIM | A node that missed a whole epoch is not caught up automatically |
+| — (HIL-derived) | Configuration replay protection, distinct from heartbeat replay | explicit epoch comparison in `handle_config()` | TC-067, TC-072, TC-080 | LOT5_RECONFIGURATION_REPORT.md §20 | IMPLEMENTED-SIM | Semantic only; no cryptographic membership authentication |
+| — (no ADD persistence requirement claimed) | Host-model configuration store: committed configuration and acceptance binding | `mosaik_node.h`: `mosaik_config_store_t`; `mosaik_load_config_store()`, `config_persist()` | TC-077, TC-082, TC-084 | LOT5_RECONFIGURATION_REPORT.md §21 | IMPLEMENTED-SIM | Host model only; no NVM/FRAM, no power-loss atomicity; term, vote and SAFE remain unpersisted |
+| REQ-FUNC-0007 | Configuration frame validation: stage 1..4, non-empty mask within three nodes | `mosaik_proto.c`: `mosaik_decode()` | TC-073 | LOT5_RECONFIGURATION_REPORT.md §11 | PARTIAL | Detection only; correlation_id still absent (ADD-F007) |
+| — (HIL-derived) | INV-LEADER-UNIQUE preserved under reconfiguration faults | whole reconfiguration path | TC-079, TC-090 and the Phase-3 oracle | LOT5_RECONFIGURATION_REPORT.md §26–§28 | CbD (sim) | 6236 bounded schedules; bounded space, not exhaustive |
+
+---
+
+## 9. Evidence Classification Reference
 
 | Code | Definition | Current Max Claim |
 |------|------------|-------------------|
 | **CbD** | Compliant-by-Design (architectural enforcement) | LOT 2A: vote-per-term, quorum, lease step-down; LOT 2B: term monotonicity, duplicate rejection |
 | **CbA** | Compliant-by-Analysis (math/static analysis) | None yet |
 | **CbT** | Compliant-by-Test on **physical hardware** | **NONE** — no hardware tests |
-| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A, 2B, 2C, 2D, 3, 4 |
+| **IMPLEMENTED-SIM** | Implemented + tested in host simulation | LOT 1, 2A, 2B, 2C, 2D, 3, 4, 5 |
 | **PARTIAL** | Partially implemented/evidenced | REQ-FUNC-0007 (CRC yes, correlation_id no) |
 | **DESIGN-ONLY** | Documented in architecture, not implemented | Most LOT 3+ requirements |
 | **NOT-STARTED** | No work begun | Many |
@@ -136,7 +152,7 @@
 
 ---
 
-## 9. Mapping Maintenance Rules
+## 10. Mapping Maintenance Rules
 
 1. Every new implementation must add/update a row in this table
 2. Status changes require evidence reference

@@ -1,7 +1,7 @@
 # MOSAÏK ADD Findings Register
 
 **Document:** MOSAIK-ADD-FIND-001  
-**Issue:** 1.3 — 17 September 2026  
+**Issue:** 1.4 — 20 September 2026  
 **Purpose:** Formal documentation of discrepancies, conflicts, and interpretations found in MOSAIK-ADD-0001
 
 ---
@@ -114,8 +114,8 @@ Each finding contains:
 | **Class** | ADD-INTERNAL, IMPLEMENTATION-GAP |
 | **Issue** | The ADD V1 physical architecture lists: EN-1, EN-2, EN-3, CN-1, COMN-1, GSE-1 ground station / MCC. GSE must NOT automatically be counted as a consensus voting member. The presence of 3 EN + CN + COMN + GSE does not by itself establish a six-voter quorum. The repository currently verifies majority behavior only on a 3-node logical cluster. The voting membership of EN/CN/COMN and the role of GSE in consensus must be derived explicitly from the normative consensus architecture. GSE shall not be assumed to vote merely because it appears in the physical architecture. |
 | **Impact** | The generic majority expression floor(N/2)+1 may be implemented, but evidence from the 3-node LOT2A test does not verify every target MOSAÏK membership configuration. Do NOT state "6-node quorum = 4" unless directly demonstrated by a normative ADD passage. |
-| **Proposed Interpretation** | Preserve generic majority computation. Classify 3-node quorum behavior as IMPLEMENTED-SIM. Classify full target-cluster voting membership as TBC/DESIGN-ONLY. Explicitly state that GSE is not counted as a voter unless a normative ADD requirement explicitly assigns it voting authority. Resolve exact voting membership before LOT 8 closure. |
-| **Status** | OPEN |
+| **Proposed Interpretation** | Preserve generic majority computation. Classify 3-node quorum behavior as IMPLEMENTED-SIM. Classify full target-cluster voting membership as TBC/DESIGN-ONLY. Explicitly state that GSE is not counted as a voter unless a normative ADD requirement explicitly assigns it voting authority. Resolve exact voting membership before LOT 8 closure.<br/><br/>**LOT 5 update (commit `146472f`, validated at `9ccd28e`).** The repository no longer derives quorum from a configured cluster size. Voting membership is now an explicit **committed membership mask** with its own configuration epoch, and quorum is `popcount(mask) / 2 + 1` over that mask; while a successor is accepted but not committed, a quorum of both configurations is required. This is a **HIL interpretation** for the three-node host demonstrator: it gives the repository a concrete, testable notion of voting membership and a protocol for changing it, and it demonstrates that a majority of the outgoing configuration alone is not a sufficient authorisation rule (`LOT5_RECONFIGURATION_REPORT.md` section 7). It does **not** resolve the ADD-level ambiguity: which of EN-1, EN-2, EN-3, CN-1, COMN-1 are voters in the target architecture, and whether GSE-1 ever votes, remains a normative architecture question. GSE is still not counted as a voter here. |
+| **Status** | OPEN at ADD level (target voting membership still to be derived from a normative passage); HIL interpretation implemented and validated in LOT 5 for the three-node demonstrator |
 | **Resolution** | — |
 
 ### ADD-F009: SAFE Exit — Ground Arbitration vs Terminal Latch
@@ -191,7 +191,7 @@ Each finding contains:
 | ADD-F005 | Environmental Requirements | VERIFICATION-GAP | OPEN |
 | ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | OPEN |
 | ADD-F007 | Correlation_ID in Critical Messages | IMPLEMENTATION-GAP | OPEN |
-| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN |
+| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN at ADD level (HIL interpretation implemented and validated in LOT 5) |
 | ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | OPEN |
 | ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | OPEN |
 | ADD-F011 | DEGRADED Exit and Freshness Semantics Not Defined | ADD-INTERNAL, IMPLEMENTATION-GAP | OPEN (interpretation implemented in LOT 3) |

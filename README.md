@@ -11,7 +11,7 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 455 checks across 60 test cases, run by
+with `-Wall -Wextra -Werror` and passes 761 checks across 90 test cases, run by
 CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
 leader from retaining authority indefinitely during a 2+1 network partition.
 Lot 2B adds stale/replay message immunity using semantic rejection based on
@@ -29,7 +29,10 @@ longer adopted as a consensus epoch (see `LOT4_MODE_SEMANTICS_REPORT.md`).
 
 This repository is a deterministic experimental protocol and verification
 bench. It is not the complete MOSAÏK ADD implementation; that is planned as a
-separate project, MOSAÏK Advanced.
+separate project, MOSAÏK Advanced. Lot 5 replaces the fixed membership with an
+explicit committed membership mask carrying its own configuration epoch, changed
+only by a PROPOSE/ACCEPT/COMMIT transaction that requires a quorum of the old and
+of the new configuration (see `LOT5_RECONFIGURATION_REPORT.md`).
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -76,6 +79,16 @@ procured. No measured latency is reported anywhere in this repository.
   metadata and out-of-range state bytes have no protocol effect — verified
   by TC-051 through TC-060, captured RED at commit `58a1b5d` before the
   correction `ae9e408`.**
+- **Autonomous reconfiguration (Lot 5): membership is an explicit committed
+  voter mask with its own configuration epoch, changed only by a distributed
+  transaction whose commit requires a quorum of the old and of the new
+  configuration; a removed node stops voting, acknowledging and standing for
+  election without being treated as faulted, and a node's own committed
+  configuration survives a cold restart — verified by TC-061 through TC-090,
+  captured RED at commit `02b27fa` before the correction `146472f`, then
+  attacked by 6236 bounded adversarial schedules at `9ccd28e` under a
+  per-millisecond invariant oracle with no safety counterexample observed
+  (see `LOT5_RECONFIGURATION_REPORT.md`).**
 
 ## What it does not demonstrate
 
@@ -84,8 +97,9 @@ procured. No measured latency is reported anywhere in this repository.
 - Any behaviour on real CAN hardware: no transceiver, bus-off handling,
   arbitration under load, or clock drift between physical nodes.
 - Raft. Election is timeout-and-priority based with per-term voting and a
-  quorum rule, inspired by Raft but without log replication, persistence or
-  membership change.
+  quorum rule, inspired by Raft but without log replication. Membership can be
+  changed since Lot 5, by a two-phase transaction over an explicit committed
+  membership rather than by Raft joint consensus over a replicated log.
 - Anything about parts quality. The bench targets commercial development
   boards. No radiation tolerance, derating, thermal or vibration argument is
   available, and none is claimed. A flight architecture would assume a
@@ -101,7 +115,10 @@ procured. No measured latency is reported anywhere in this repository.
   model (628 ms and 680 ms after the crash); it does not bound the hardware
   worst case and does not model sub-millisecond bus races.**
 - **Term or vote persistence across restart. A restart is a cold start, and
-  it also clears SAFE: SAFE is not persisted across a power cycle.**
+  it also clears SAFE: SAFE is not persisted across a power cycle. Lot 5 adds
+  one host-model configuration store per node, holding only that node's
+  committed membership and its acceptance binding; it is a host model, not
+  non-volatile-memory validation.**
 - **Ground arbitration (PGA), a SAFE exit API, a PROTO_ERROR policy, safety
   discretes, watchdogs, or any hardware FDIR. Malformed frames are counted
   and never cause SAFE.**

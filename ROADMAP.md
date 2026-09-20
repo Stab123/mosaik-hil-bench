@@ -1,7 +1,7 @@
 # MOSAÏK Development Roadmap
 
 **Document:** MOSAIK-ROADMAP-001  
-**Issue:** 1.3 — 17 September 2026  
+**Issue:** 1.4 — 20 September 2026  
 **Parent:** MOSAIK-ADD-0001 (Issue 1 / Rev 1, dated 24 April 2026)
 
 ---
@@ -27,7 +27,7 @@ This roadmap defines the controlled, incremental development of the MOSAÏK dist
 | **LOT 2D** | Crash/Restart/Recovery | Crash and cold-restart models, candidate retry backoff after split vote, TC-021–TC-034 | **IMPLEMENTED (host sim)** — persistent terms NOT implemented (cold restart only) |
 | **LOT 3** | FDIR and SAFE | SAFE contract, DEGRADED from received peer SAFE evidence, recovery around a SAFE node, TC-035–TC-050; PROTO_ERROR policy, local fault input, SAFE_ASSERT and PGA deferred | **IMPLEMENTED (host sim)** |
 | **LOT 4** | Local Mode Semantics (four-state host model) | INIT, NOMINAL, DEGRADED, SAFE × FOLLOWER, CANDIDATE, LEADER: election does not degrade (C1), SAFE announcement term is not consensus evidence (C2), state metadata non-authoritative, TC-051–TC-060; ADAPTIVE and PGA dependency-blocked, deferred to MOSAÏK Advanced | **IMPLEMENTED (host sim)** |
-| **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes | NOT STARTED |
+| **LOT 5** | Autonomous Reconfiguration | Quorum reconfiguration, membership changes: committed membership mask, configuration epoch, PROPOSE/ACCEPT/COMMIT transaction with joint old-and-new quorum, membership-aware elections and lease, removed-node exclusion, host-model configuration store, TC-061–TC-090 | **CLOSED — HOST DEMONSTRATOR** |
 | **LOT 6** | CAN-FD / Communications / ICD | Physical layer, bitrates, ICD, bus-off handling | NOT STARTED |
 | **LOT 7** | Embedded Services | Logger, time, file system, health monitoring | NOT STARTED |
 | **LOT 8** | EN/CN/COMN Multi-Node Architecture | Full 6-node architecture (3 EN, CN, COMN) | NOT STARTED |
@@ -92,17 +92,19 @@ All evidence in this repository uses these classifications:
 
 ---
 
-## 6. Current Baseline (LOT 2A through LOT 4)
+## 6. Current Baseline (LOT 2A through LOT 5)
 
-**Verified commit:** `ae9e408a50d6f80257f77fa245247741295c0b7d`  
+**Verified commit:** `9ccd28e867d74cb9667addb5676ad009fa849a07`  
 **Branch:** `lot2c-network-adversarial`  
-**Tests:** 60 test cases (TC-001 through TC-060)  
-**Checks:** 455 checks, 0 failures  
+**Tests:** 90 test cases (TC-001 through TC-090)  
+**Checks:** 761 checks, 0 failures  
 **Compiler:** `-std=c99 -Wall -Wextra -Werror -O1` PASS  
 **Sanitizers:** AddressSanitizer + UndefinedBehaviorSanitizer PASS, 0 findings  
 **Invariants:** maximum concurrent valid authorities 1; term regressions 0  
-**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0; `76f10d9` LOT 2 closure; `af5da87` LOT 3 RED baseline 360 checks / 13 failed checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048, TC-050; `034db92` LOT 2 same-term vote-memory erratum corrected, TC-050 green; `7df0af0` DEGRADED evidence semantics, 360 / 0; `8177e70` LOT 3 closure; `58a1b5d` LOT 4 RED baseline 455 checks / 7 failed checks in exactly TC-052 (2) and TC-053 (5); `ae9e408` election no longer degrades and SAFE term no longer adopted, 455 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md` and `LOT4_MODE_SEMANTICS_REPORT.md`.  
-**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term/vote persistence; split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4; SAFE latched within one powered node instance only (cleared by cold restart); PROTO_ERROR reserved, not implemented; no PGA, discretes, watchdog or hardware FDIR; four local states only, ADAPTIVE and PGA not implemented; this bench is not the complete ADD implementation (planned separately as MOSAÏK Advanced).
+**History:** `c6f600b` harness lease evidence corrected; `d38985d` RED baseline 201 checks / 7 failures (TC-028 pre-existing, TC-031 intentional); `f4e0f3c` candidate retry backoff, 205 / 0; `76f10d9` LOT 2 closure; `af5da87` LOT 3 RED baseline 360 checks / 13 failed checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048, TC-050; `034db92` LOT 2 same-term vote-memory erratum corrected, TC-050 green; `7df0af0` DEGRADED evidence semantics, 360 / 0; `8177e70` LOT 3 closure; `58a1b5d` LOT 4 RED baseline 455 checks / 7 failed checks in exactly TC-052 (2) and TC-053 (5); `ae9e408` election no longer degrades and SAFE term no longer adopted, 455 / 0; `7d35cc8` LOT 4 closure; `02b27fa` LOT 5 RED baseline 515 checks / 11 failed checks in exactly TC-064, TC-065, TC-066, TC-067 and TC-068; `146472f` LOT 5 membership reconfiguration implemented, 667 / 0; `9ccd28e` LOT 5 adversarial campaign, test-only, 761 / 0. See `LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md`, `LOT4_MODE_SEMANTICS_REPORT.md` and `LOT5_RECONFIGURATION_REPORT.md`.  
+**LOT 5 closure lineage:** RED `02b27faa55d0e437337cb3d513a1d9683797416a` (70 / 515 / 11); GREEN `146472f888b3f784fe0de25bd5c8e5cc39a6d5c3` (78 / 667 / 0, the only LOT 5 commit that changed firmware); adversarial `9ccd28e867d74cb9667addb5676ad009fa849a07` (90 / 761 / 0, `test/test_mosaik.c` only); documentation closure, this commit. Evidence is bounded deterministic three-node host evidence: **not** a formal proof, **not** validation for arbitrary cluster sizes, **not** hardware validation. Within the bounded adversarial state space executed by TC-061 to TC-090, no safety counterexample was observed. Two liveness limitations remain open and are documented in `LOT5_RECONFIGURATION_REPORT.md` section 29.
+
+**Limitations:** Host deterministic simulation only; 3-node topology; 500 ms simulated lease; semantic stale/replay rejection only (no cryptographic anti-replay); no term, vote or SAFE persistence (LOT 5 adds a host-model configuration store for the committed membership only); split vote possible, only its lock-step persistence addressed; sub-millisecond bus races not modelled; no physical CAN-FD validation; no HIL; no TRL 4; SAFE latched within one powered node instance only (cleared by cold restart); PROTO_ERROR reserved, not implemented; no PGA, discretes, watchdog or hardware FDIR; four local states only, ADAPTIVE and PGA not implemented; this bench is not the complete ADD implementation (planned separately as MOSAÏK Advanced).
 
 Previous baseline (LOT 2A through LOT 3): commit `7df0af01d6ae2120bce9a5c6378305e3ef7eeb5c`, 50 test cases, 360 checks, 0 failures.
 
@@ -155,7 +157,7 @@ Previous baseline (LOT 2A + LOT 2B): commit `806646a0a17803e70fff7bc65b6bf45eee4
 | ADD-F005 | Environmental Requirements | VERIFICATION-GAP | LOT 13, 14 |
 | ADD-F006 | Test ID / Requirement Mapping Inconsistencies | TRACEABILITY-GAP | Ongoing |
 | ADD-F007 | Correlation_ID in Critical Messages | IMPLEMENTATION-GAP | LOT 6 |
-| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | LOT 8 |
+| ADD-F008 | Quorum Definition — Voting Membership | ADD-INTERNAL, IMPLEMENTATION-GAP | HIL interpretation implemented and validated in LOT 5 for the three-node demonstrator; general ADD voting membership still open, LOT 8 |
 | ADD-F009 | SAFE Exit / PGA | IMPLEMENTATION-GAP | LOT 8 (LOT 3 closed with the software latch documented; PGA not implemented) |
 | ADD-F011 | DEGRADED Exit / Freshness Semantics | ADD-INTERNAL, IMPLEMENTATION-GAP | Host interpretation implemented in LOT 3; architecture review |
 | ADD-F010 | Heartbeat Root/Derived Timing Traceability | TRACEABILITY-GAP | Architecture review / LOT 6 |

@@ -1,7 +1,7 @@
 # MOSAÏK Bidirectional Traceability
 
 **Document:** MOSAIK-TRACE-001  
-**Issue:** 1.4 — 17 September 2026  
+**Issue:** 1.5 — 20 September 2026  
 **Purpose:** Bidirectional traceability matrix linking ADD requirements ↔ derived requirements ↔ architecture ↔ implementation ↔ test ↔ result ↔ evidence
 
 ---
@@ -194,6 +194,36 @@ Test Result / Evidence
 | TC-058 | REQ-FUNC-0001 (uniqueness); cold-restart property | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:185, 433, 471` | PASS | IMPLEMENTED-SIM |
 | TC-059 | REQ-SAFE-0004 | REQ-SAF-003 | Cluster_Task / svc_mosaik_proto | `mosaik_node.c:256, 375` | PASS (terms and authority unchanged over 1000 steps) | IMPLEMENTED-SIM |
 | TC-060 | NONE (reproducibility) | — | svc_mosaik_proto | deterministic RNG | PASS | IMPLEMENTED-SIM |
+| TC-061 | NONE (HIL-derived: INV-RECONFIG-QUORUM) | — | svc_mosaik_proto | `mosaik_node.c:quorum_of`, `mosaik_proto.c:decode` | PASS | IMPLEMENTED-SIM |
+| TC-062 | NONE (HIL-derived: INV-RECONFIG-NO-MAGIC) | — | Cluster_Task / svc_mosaik_proto | membership gate in `mosaik_on_rx` | PASS | IMPLEMENTED-SIM |
+| TC-063 | REQ-FUNC-0002 (no authority without quorum) | REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_request_reconfiguration` authority gate | PASS | IMPLEMENTED-SIM |
+| TC-064 | REQ-FUNC-0002 (quorum-based reconfiguration) | REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `handle_config` PROPOSE/ACCEPT/COMMIT | PASS (RED at 02b27fa) | IMPLEMENTED-SIM |
+| TC-065 | NONE (HIL-derived: INV-RECONFIG-TRANSITION) | — | Cluster_Task / svc_mosaik_proto | joint commit rule in `handle_config` | PASS (RED at 02b27fa) | IMPLEMENTED-SIM |
+| TC-066 | NONE (HIL-derived: INV-RECONFIG-REMOVED-NODE) | — | Cluster_Task / svc_mosaik_proto | `mosaik_load_config_store`, membership gate | PASS (RED at 02b27fa) | IMPLEMENTED-SIM |
+| TC-067 | NONE (HIL-derived: INV-RECONFIG-OLD-CONFIG) | — | svc_mosaik_proto | epoch comparison in `handle_config` | PASS (RED at 02b27fa) | IMPLEMENTED-SIM |
+| TC-068 | REQ-FUNC-0001 (leader uniqueness) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | joint election and lease rules | PASS (RED at 02b27fa) | IMPLEMENTED-SIM |
+| TC-069 | REQ-FUNC-0001, REQ-FUNC-0002 | REQ-FUN-001, REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | `mosaik_has_quorum_ack_evidence` | PASS | IMPLEMENTED-SIM |
+| TC-070 | NONE (reproducibility) | — | svc_mosaik_proto | deterministic core and harness | PASS | IMPLEMENTED-SIM |
+| TC-071 | NONE (HIL-derived: INV-RECONFIG-CONSISTENT) | — | svc_mosaik_proto | one binding per epoch, conflict refusal | PASS | IMPLEMENTED-SIM |
+| TC-072 | NONE (HIL-derived: INV-RECONFIG-OLD-CONFIG) | — | svc_mosaik_proto | duplicate and reorder handling | PASS | IMPLEMENTED-SIM |
+| TC-073 | REQ-FUNC-0007 (frame validity) | REQ-ICD-002 | svc_mosaik_proto | `mosaik_decode` CONFIG validation, `mask_valid` | PASS | PARTIAL |
+| TC-074 | NONE (HIL-derived: INV-RECONFIG-TRANSITION) | — | Cluster_Task / svc_mosaik_proto | commit rule, announcement repair | PASS | IMPLEMENTED-SIM |
+| TC-075 | NONE (HIL-derived: INV-RECONFIG-REMOVED-NODE) | — | Cluster_Task / svc_mosaik_proto | membership gate in `mosaik_on_rx` | PASS | IMPLEMENTED-SIM |
+| TC-076 | REQ-FUNC-0002 | REQ-FUN-002 | Cluster_Task / svc_mosaik_proto | joint commit rule, ACCEPT source rule | PASS | IMPLEMENTED-SIM |
+| TC-077 | NONE (HIL-derived: host-model persistence) | — | svc_mosaik_proto | `mosaik_load_config_store`, `config_persist` | PASS | IMPLEMENTED-SIM |
+| TC-078 | REQ-SAFE-0003, REQ-SAFE-0004 | REQ-SAF-002, REQ-SAF-003 | Cluster_Task / svc_mosaik_proto | SAFE gate, DEGRADED evidence, proposer maintenance | PASS | IMPLEMENTED-SIM |
+| TC-079 | REQ-FUNC-0001 (adversarial) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | whole reconfiguration path | PASS (1536 schedules) | IMPLEMENTED-SIM |
+| TC-080 | NONE (HIL-derived: INV-RECONFIG-OLD-CONFIG) | — | svc_mosaik_proto | epoch comparison, duplicate handling | PASS | IMPLEMENTED-SIM |
+| TC-081 | NONE (HIL-derived: INV-RECONFIG-TRANSITION) | — | Cluster_Task / svc_mosaik_proto | commit rule, store reload, announcement repair | PASS (40 schedules) | IMPLEMENTED-SIM |
+| TC-082 | NONE (HIL-derived: INV-RECONFIG-CONSISTENT) | — | svc_mosaik_proto | persisted binding, conflict refusal | PASS (6 crash points) | IMPLEMENTED-SIM |
+| TC-083 | NONE (HIL-derived: INV-RECONFIG-REMOVED-NODE, INV-RECONFIG-QUORUM) | — | Cluster_Task / svc_mosaik_proto | membership gate, epoch admission rule | PASS (10 stuck cases) | IMPLEMENTED-SIM |
+| TC-084 | NONE (HIL-derived: INV-RECONFIG-REMOVED-NODE) | — | Cluster_Task / svc_mosaik_proto | `config_commit`, evidence freshness | PASS | IMPLEMENTED-SIM |
+| TC-085 | NONE (HIL-derived: INV-RECONFIG-CONSISTENT) | — | svc_mosaik_proto | one binding per epoch | PASS | IMPLEMENTED-SIM |
+| TC-086 | NONE (HIL-derived: INV-TERM-MONOTONIC and epoch independence) | — | svc_mosaik_proto | CONFIG dispatch before term processing | PASS | IMPLEMENTED-SIM |
+| TC-087 | REQ-FUNC-0001 (authority evidence) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | `mosaik_has_quorum_ack_evidence` freshness | PASS (boundary 99/100 ms) | IMPLEMENTED-SIM |
+| TC-088 | REQ-SAFE-0003, REQ-SAFE-0004 | REQ-SAF-002, REQ-SAF-003 | Cluster_Task / svc_mosaik_proto | SAFE gate, DEGRADED evidence | PASS | IMPLEMENTED-SIM |
+| TC-089 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | lease, retransmission and abandonment timers | PASS (0 overlaps) | IMPLEMENTED-SIM |
+| TC-090 | REQ-FUNC-0001 (adversarial) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | whole reconfiguration path | PASS (4608 schedules) | IMPLEMENTED-SIM |
 
 ---
 
@@ -261,8 +291,21 @@ Test Result / Evidence
 | TC-058 | F-01 | RELATED | LOT 4; partition, crash, cold restart legality |
 | TC-059 | S-01 | RELATED | LOT 4; lower-term SAFE announcement |
 | TC-060 | — | NONE | LOT 4; determinism of the RED scenarios |
+| TC-061–TC-063 | — | NONE | LOT 5; membership representation and the rule that reachability is not membership |
+| TC-064, TC-076 | F-02 (quorum reconfiguration) | RELATED | LOT 5; a membership transition executed through the protocol |
+| TC-065, TC-068, TC-074, TC-081 | — | NONE | LOT 5; joint quorum and partial-commit safety, HIL-derived |
+| TC-066, TC-075, TC-083, TC-084 | — | NONE | LOT 5; removed-node and re-admission semantics, HIL-derived |
+| TC-067, TC-072, TC-080 | R-01 (stale rejection) | RELATED | LOT 5; configuration replay protection, distinct from heartbeat replay |
+| TC-069, TC-087, TC-089 | F-01, P-01 | RELATED | LOT 5; authority and lease evidence under membership change |
+| TC-070 | — | NONE | LOT 5; determinism |
+| TC-071, TC-082, TC-085 | — | NONE | LOT 5; one successor per epoch, HIL-derived |
+| TC-073 | I-01 (codec/CRC) | RELATED | LOT 5; configuration frame validation |
+| TC-077 | — | NONE | LOT 5; host-model configuration store, no ADD persistence requirement is claimed |
+| TC-078, TC-088 | S-01 (SAFE) | RELATED | LOT 5; SAFE and DEGRADED during a transaction |
+| TC-079, TC-090 | — | NONE | LOT 5; bounded adversarial schedule matrices |
+| TC-086 | — | NONE | LOT 5; configuration epoch and leadership term independence |
 
-**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay. LOT 2C and LOT 2D tests TC-013–TC-034 are RELATED evidence only: the current Section 82 transcription (ADD-F001) contains no test case for directional faults, crash, restart or election-retry behaviour, so no FULL mapping is claimed and no ADD identifier is invented. LOT 3 tests TC-035–TC-050 follow the same rule: RELATED where a Section 82 test case examines similar SAFE, quorum, latency or codec behaviour, NONE for DEGRADED semantics (ADD-F011), reproducibility and the one-vote invariant. LOT 4 tests TC-051–TC-060 follow the same rule: RELATED where a Section 82 test case examines similar SAFE, election, stale-term or codec behaviour, NONE for the mode invariants (INV-MODE-LEGAL, INV-MODE-NO-MAGIC, INV-MODE-METADATA-NONAUTHORITATIVE), which have no ADD requirement ID, and for determinism.
+**Policy:** Repository TC-xxx IDs are preserved. Mapping to ADD test cases is explicit above. No renaming of repo tests. A mapping can be: FULL / PARTIAL / RELATED / NONE. Do not imply equivalence merely because two tests examine similar behavior. In particular, LOT 2B tests TC-008–TC-012 are PARTIAL evidence toward ADD anti-replay/safety requirements because they test deterministic scenarios only with semantic rejection, not cryptographic anti-replay. LOT 2C and LOT 2D tests TC-013–TC-034 are RELATED evidence only: the current Section 82 transcription (ADD-F001) contains no test case for directional faults, crash, restart or election-retry behaviour, so no FULL mapping is claimed and no ADD identifier is invented. LOT 3 tests TC-035–TC-050 follow the same rule: RELATED where a Section 82 test case examines similar SAFE, quorum, latency or codec behaviour, NONE for DEGRADED semantics (ADD-F011), reproducibility and the one-vote invariant. LOT 4 tests TC-051–TC-060 follow the same rule: RELATED where a Section 82 test case examines similar SAFE, election, stale-term or codec behaviour, NONE for the mode invariants (INV-MODE-LEGAL, INV-MODE-NO-MAGIC, INV-MODE-METADATA-NONAUTHORITATIVE), which have no ADD requirement ID, and for determinism. LOT 5 tests TC-061–TC-090 follow it again. The eight reconfiguration invariants (INV-RECONFIG-NO-MAGIC, INV-RECONFIG-CONSISTENT, INV-RECONFIG-AUTHORITY, INV-RECONFIG-QUORUM, INV-RECONFIG-PARTITION, INV-RECONFIG-OLD-CONFIG, INV-RECONFIG-REMOVED-NODE, INV-RECONFIG-TRANSITION) have no normative ADD requirement identifier and are labelled **HIL-derived experimental invariants**: they were frozen during the LOT 5 specification freeze for the three-node host demonstrator, not transcribed from the ADD. Where a LOT 5 test also exercises an inherited invariant (INV-LEADER-UNIQUE, INV-SAFE-NO-AUTHORITY, INV-SAFE-LATCH, INV-NO-STALE-RECOVERY, INV-TERM-MONOTONIC, INV-ONE-VOTE-PER-TERM) the corresponding ADD requirement is named in the matrix above. No requirement identifier was invented.
 
 ---
 
@@ -694,3 +737,82 @@ section 5.
 | **Forward** | NONE (reproducibility evidence) → per-node xorshift RNG seeded by id, integer-only simulation → TC-060 → PASS (run A equals run B in per-step roles, states, terms, authority, evidence masks, transmit counts and event times for both scenarios; hashes 0x19E7D8FF and 0xEA9EE0E6 at `ae9e408`, 0x5DE7D8FF and 0x70EE8189 at `58a1b5d`) → IMPLEMENTED-SIM |
 | **Reverse** | TC-060 → the TC-052 and TC-053 scenario drivers run twice → deterministic core and harness → NONE |
 | **Limitation** | Reproducibility of the host model only; the comparison is run against run, independent of the RED properties. |
+
+---
+
+## 9. LOT 5 Test Cases Traceability (TC-061 through TC-090)
+
+Validated at commit `9ccd28e867d74cb9667addb5676ad009fa849a07` (761 checks,
+0 failures, ASan/UBSan clean). RED evidence at `02b27fa` is recorded per
+test. All evidence is IMPLEMENTED-SIM: deterministic host demonstrator only.
+The eight INV-RECONFIG invariants are HIL-derived experimental invariants
+with no normative ADD identifier; see the policy note in section 4.
+
+### Phase 1, characterisation and RED baseline (`02b27fa`)
+
+| Test | Checks | Property | History |
+|---|---|---|---|
+| TC-061 | 11 | membership is an explicit committed mask with its own epoch; `cluster_size` is inert | characterisation |
+| TC-062 | 7 | peer loss is not membership removal | guard |
+| TC-063 | 7 | a minority partition cannot reconfigure itself into a quorum | guard |
+| TC-064 | 15 | a membership change is proposed, agreed and committed | RED at `02b27fa` (2 checks) |
+| TC-065 | 12 | a reduction affects quorum only once both configurations agreed | RED at `02b27fa` (5 checks) |
+| TC-066 | 11 | a removed node does not regain voting by cold restart | RED at `02b27fa` (2 checks) |
+| TC-067 | 15 | stale, duplicate and future configuration traffic move nothing | RED at `02b27fa` (1 check) |
+| TC-068 | 9 | partition during a transition yields no incompatible authority | RED at `02b27fa` (1 check) |
+| TC-069 | 9 | LOT 2 authority and lease semantics unchanged | guard |
+| TC-070 | 3 | determinism of the reconfiguration scenarios | guard |
+
+### Phase 2, functional validation (`146472f`)
+
+| Test | Checks | Property |
+|---|---|---|
+| TC-071 | 9 | conflicting successors of one epoch cannot both be agreed |
+| TC-072 | 9 | every transaction stage is idempotent and order-insensitive |
+| TC-073 | 19 | malformed, empty, single-node and proposer-excluding memberships refused; epoch does not wrap |
+| TC-074 | 19 | proposer failure before agreement, after an undelivered commit, after a partial commit, and past the election budget |
+| TC-075 | 12 | removed-node traffic restores no voting, authority or lease |
+| TC-076 | 17 | every permitted transition, including re-admission and a two-change transition |
+| TC-077 | 11 | host-model configuration store: pending binding, committed configuration, corrupted content |
+| TC-078 | 17 | transaction alongside SAFE, DEGRADED, an election and a lease expiry |
+
+### Phase 3, adversarial campaign (`9ccd28e`, test-only)
+
+| Test | Checks | Attack category | Schedules |
+|---|---|---|---|
+| TC-079 | 2 | partial COMMIT delivery x partitions x crash points | 1536 |
+| TC-080 | 11 | CONFIG loss, duplication, delay, reordering, stage inversion | targeted |
+| TC-081 | 2 | proposer crash at 10 points x 4 restart conditions | 40 |
+| TC-082 | 4 | acceptor crash around its acceptance | 6 |
+| TC-083 | 10 | removed-node frame attacks; missed-epoch safety | 10 stuck cases |
+| TC-084 | 13 | re-admission isolated to a single step; restarts either side | targeted |
+| TC-085 | 14 | two different successors of one epoch | targeted |
+| TC-086 | 8 | configuration epoch and leadership term cross product | targeted |
+| TC-087 | 10 | lease evidence attacks; exact freshness boundary | targeted |
+| TC-088 | 14 | SAFE and DEGRADED at four transaction stages | 4 stages |
+| TC-089 | 4 | one-millisecond timer boundaries | 6 |
+| TC-090 | 2 | bounded deterministic schedule explorer | 4608 |
+
+Total committed adversarial schedules: **6236**. Every Phase-3 scenario runs
+under a continuous invariant oracle evaluated at each simulated millisecond.
+No safety counterexample was observed. Two liveness limitations are recorded
+by the tests themselves: see `LOT5_RECONFIGURATION_REPORT.md` section 29.
+
+### Invariant coverage
+
+| Invariant | Class | Covered by |
+|---|---|---|
+| INV-RECONFIG-NO-MAGIC | HIL-derived | TC-062, TC-063, TC-073, TC-077, TC-080, TC-083 |
+| INV-RECONFIG-CONSISTENT | HIL-derived | TC-064, TC-065, TC-071, TC-082, TC-085 |
+| INV-RECONFIG-AUTHORITY | HIL-derived | TC-063, TC-073, TC-075, TC-083, TC-084 |
+| INV-RECONFIG-QUORUM | HIL-derived | TC-061, TC-062, TC-064, TC-066, TC-083 |
+| INV-RECONFIG-PARTITION | HIL-derived | TC-063, TC-073, TC-077 |
+| INV-RECONFIG-OLD-CONFIG | HIL-derived | TC-067, TC-072, TC-073, TC-080 |
+| INV-RECONFIG-REMOVED-NODE | HIL-derived | TC-065, TC-066, TC-075, TC-083, TC-084, TC-087 |
+| INV-RECONFIG-TRANSITION | HIL-derived | TC-065, TC-068, TC-071, TC-074, TC-077, TC-081, TC-086 |
+| INV-LEADER-UNIQUE | inherited, REQ-FUNC-0001 | TC-062..TC-090, continuously in Phase 3 |
+| INV-SAFE-NO-AUTHORITY | inherited, REQ-SAFE-0003 | TC-063, TC-078, TC-088, Phase-3 oracle |
+| INV-SAFE-LATCH | inherited, REQ-SAFE-0003 | TC-078, TC-088, Phase-3 oracle |
+| INV-NO-STALE-RECOVERY | inherited | TC-067, TC-084 |
+| INV-TERM-MONOTONIC | inherited | TC-064, TC-086, Phase-3 oracle |
+| INV-ONE-VOTE-PER-TERM | inherited | TC-075, TC-084, TC-086 |

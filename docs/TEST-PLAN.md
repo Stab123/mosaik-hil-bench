@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Test Plan
 
 **Document:** MOSAIK-HIL-TP-001
-**Issue:** 0.6 — 17 September 2026
+**Issue:** 0.7 — 20 September 2026
 
 ## 1. Two levels of verification
 
@@ -81,17 +81,63 @@ the traces are committed under `results/`.
 | TC-058 | Partition / crash / re-election / cold restart legality | INV-MODE-LEGAL, Lot 4 | pass |
 | TC-059 | Lower-term SAFE announcement: evidence only, healthy terms and authority unchanged | REQ-SAFE-0004, Lot 4 | pass |
 | TC-060 | Determinism of the TC-052 and TC-053 scenarios (run A vs run B) | — | pass |
+| TC-061 | Membership is an explicit committed mask with its own epoch; cluster_size is inert | INV-RECONFIG-QUORUM, Lot 5 | pass |
+| TC-062 | Peer loss is not membership removal | INV-RECONFIG-NO-MAGIC, Lot 5 | pass |
+| TC-063 | Minority partition cannot reconfigure itself into a quorum | INV-RECONFIG-PARTITION, Lot 5 | pass |
+| TC-064 | A membership change is proposed, agreed and committed | REQ-FUNC-0002, Lot 5 | pass (RED at `02b27fa`) |
+| TC-065 | A reduction affects quorum only once both configurations agreed | INV-RECONFIG-TRANSITION, Lot 5 | pass (RED at `02b27fa`) |
+| TC-066 | A removed node does not regain voting membership by cold restart | INV-RECONFIG-REMOVED-NODE, Lot 5 | pass (RED at `02b27fa`) |
+| TC-067 | Stale, duplicate and unsupported-future configuration traffic | INV-RECONFIG-OLD-CONFIG, Lot 5 | pass (RED at `02b27fa`) |
+| TC-068 | Partition during a transition: no incompatible authority | INV-RECONFIG-TRANSITION, Lot 5 | pass (RED at `02b27fa`) |
+| TC-069 | Authority and lease non-regression with membership traffic | REQ-FUNC-0001, Lot 5 | pass |
+| TC-070 | Determinism of the reconfiguration scenarios | — | pass |
+| TC-071 | Conflicting successors of one epoch cannot both be agreed | INV-RECONFIG-CONSISTENT, Lot 5 | pass |
+| TC-072 | Duplicate and reordered transaction frames are idempotent | INV-RECONFIG-OLD-CONFIG, Lot 5 | pass |
+| TC-073 | Malformed, empty and single-node memberships refused; epoch does not wrap | REQ-FUNC-0007, Lot 5 | pass |
+| TC-074 | Proposer failure before agreement, after an undelivered commit, after a partial commit | INV-RECONFIG-TRANSITION, Lot 5 | pass |
+| TC-075 | Removed-node traffic restores no voting, authority or lease | INV-RECONFIG-REMOVED-NODE, Lot 5 | pass |
+| TC-076 | Every permitted transition, re-admission and a two-change transition | REQ-FUNC-0002, Lot 5 | pass |
+| TC-077 | Host-model configuration store: binding, commit, corrupted content | INV-RECONFIG-NO-MAGIC, Lot 5 | pass |
+| TC-078 | Transaction alongside SAFE, DEGRADED, an election and a lease expiry | REQ-SAFE-0003/0004, Lot 5 | pass |
+| TC-079 | Partial COMMIT delivery exhausted over subsets, partitions, crash points | REQ-FUNC-0001, Lot 5 Phase 3 | pass (1536 schedules) |
+| TC-080 | CONFIG loss, duplication, delay and reordering at every stage | INV-RECONFIG-OLD-CONFIG, Lot 5 Phase 3 | pass |
+| TC-081 | Proposer failure at ten points x four restart conditions | INV-RECONFIG-TRANSITION, Lot 5 Phase 3 | pass (40 schedules) |
+| TC-082 | Acceptor failure around its acceptance; persisted binding binds | INV-RECONFIG-CONSISTENT, Lot 5 Phase 3 | pass (6 crash points) |
+| TC-083 | Removed-node attacks and missed-epoch safety | INV-RECONFIG-REMOVED-NODE, Lot 5 Phase 3 | pass (10 stuck cases) |
+| TC-084 | Re-admission does not turn old evidence into fresh authority | INV-RECONFIG-REMOVED-NODE, Lot 5 Phase 3 | pass |
+| TC-085 | Two different successors of one epoch | INV-RECONFIG-CONSISTENT, Lot 5 Phase 3 | pass |
+| TC-086 | Configuration epoch and leadership term independence | INV-TERM-MONOTONIC, Lot 5 Phase 3 | pass |
+| TC-087 | Lease evidence attacks and the exact freshness boundary | REQ-FUNC-0001, Lot 5 Phase 3 | pass (99/100 ms) |
+| TC-088 | SAFE and DEGRADED injected at every transaction stage | REQ-SAFE-0003/0004, Lot 5 Phase 3 | pass |
+| TC-089 | One-millisecond boundaries around the protocol timers | REQ-FUNC-0001, Lot 5 Phase 3 | pass (0 overlaps) |
+| TC-090 | Bounded deterministic schedule explorer | REQ-FUNC-0001, Lot 5 Phase 3 | pass (4608 schedules) |
 
-Current total at commit `ae9e408`: 60 tests, 455 checks, 0 failures,
+Current total at commit `9ccd28e`: 90 tests, 761 checks, 0 failures,
 sanitizer clean. RED-before-fix evidence is preserved in history:
 TC-031 was added RED at `d38985d` (6 failing checks) and passes since
 `f4e0f3c` (LOT 2D); TC-035–TC-050 were added at `af5da87` with 13 failing
 checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048 and TC-050; TC-050
 passes since `034db92` and the five DEGRADED tests since `7df0af0`;
 TC-051–TC-060 were added at `58a1b5d` with 7 failing checks in exactly
-TC-052 (2) and TC-053 (5), which pass since `ae9e408`. See
-`LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md` and
-`LOT4_MODE_SEMANTICS_REPORT.md`.
+TC-052 (2) and TC-053 (5), which pass since `ae9e408`; TC-061–TC-070 were
+added at `02b27fa` with 11 failing checks in exactly TC-064, TC-065, TC-066,
+TC-067 and TC-068, which pass since `146472f`. See
+`LOT2D_CRASH_RECOVERY_REPORT.md`, `LOT3_FDIR_SAFE_REPORT.md`,
+`LOT4_MODE_SEMANTICS_REPORT.md` and `LOT5_RECONFIGURATION_REPORT.md`.
+
+**LOT 5 test phases.** TC-061 to TC-063 are Phase-1 characterisation of the
+fixed-membership baseline. TC-064 to TC-068 are the Phase-1 RED evidence,
+rewritten at `146472f` from "capability absent" observations into executable
+functional properties. TC-069 to TC-078 are Phase-2 functional validation of
+the implemented mechanism. TC-079 to TC-090 are the Phase-3 adversarial
+campaign, added at `9ccd28e` with no firmware change, covering partial
+COMMIT, partitions, proposer crash, acceptor crash, restart, loss,
+duplication, delay, reordering, removed-node attacks, re-admission,
+conflicting successors, term and configuration-epoch interaction, lease
+evidence, SAFE and DEGRADED, time boundaries, and a bounded deterministic
+schedule explorer. The committed and reproducible adversarial evidence is
+6236 in-suite schedules; exploratory work outside the repository is not
+counted as evidence.
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
 is executed on every push by the CI workflow.

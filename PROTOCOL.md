@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.6 — 17 September 2026
+**Issue:** 0.7 — 20 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -21,8 +21,15 @@ carrying no payload functions.
 - Three nodes, coordination role only. No payload, thermal or optical function.
 - Leader election is timeout-and-priority based, using per-term voting and a
   quorum rule. It is **inspired by** Raft. It is not Raft: there is no log
-  replication, no persistent state across reset, and no membership change
-  protocol.
+  replication. Since Lot 5 there **is** a membership-change protocol
+  (section 10); it is a two-phase transaction over an explicit committed
+  membership, not Raft joint consensus over a replicated log.
+- Persistence is limited and specific. Term, vote and SAFE state are **not**
+  persisted: a restart is a cold start. Since Lot 5 one host-model
+  configuration store per node survives a restart, holding only that node's
+  committed configuration and its acceptance binding (section 10.7). This is
+  a host model. It is not non-volatile-memory validation, not a power-loss
+  atomicity argument and not flight persistence.
 - No authentication or integrity protection beyond CRC-8. The bus is trusted.
 - Recovery from SAFE is not implemented. SAFE is latched and requires an
   operator reset, standing in for the PENDING_GROUND_ARBITRATION mode of the
@@ -79,9 +86,13 @@ the lowest range.
 | Vote request | `0x100 + node_id` | |
 | Vote grant | `0x180 + node_id` | |
 | Heartbeat | `0x200 + node_id` | |
+| Configuration (Lot 5) | `0x280 + node_id` | |
 | Acknowledgement (Lot 2C) | `0x300 + node_id` | lowest |
 
-`node_id` is 1..3. Identifier `0x080` itself is unused.
+`node_id` is 1..3, so the decodable identifiers are `0x081`..`0x083`,
+`0x101`..`0x103`, `0x181`..`0x183`, `0x201`..`0x203`, `0x281`..`0x283` and
+`0x301`..`0x303`: eighteen in total. A base identifier such as `0x080` or
+`0x280` is itself unused.
 
 ## 5. Payload
 
@@ -91,18 +102,25 @@ All messages use DLC 8.
 |---|---|
 | 0 | Protocol version (`0x01`) |
 | 1 | Source node id |
-| 2 | Role (0 follower, 1 candidate, 2 leader) |
-| 3 | State (0 INIT, 1 NOMINAL, 2 DEGRADED, 3 SAFE) |
-| 4 | Term, low byte |
-| 5 | Term, high byte |
-| 6 | Argument — heartbeat: sequence number; vote grant: target node id; SAFE: cause code; acknowledgement: echoed heartbeat sequence number |
+| 2 | Role (0 follower, 1 candidate, 2 leader) — configuration frame: stage |
+| 3 | State (0 INIT, 1 NOMINAL, 2 DEGRADED, 3 SAFE) — configuration frame: membership mask |
+| 4 | Term, low byte — configuration frame: configuration epoch, low byte |
+| 5 | Term, high byte — configuration frame: configuration epoch, high byte |
+| 6 | Argument — heartbeat: sequence number; vote grant: target node id; SAFE: cause code; acknowledgement: echoed heartbeat sequence number; configuration ACCEPT: proposer node id |
 | 7 | CRC-8 over bytes 0..6 |
+
+A configuration frame carries no role and no state; a receiver decodes those
+two fields as follower and INIT respectively. Its bytes 4 and 5 carry a
+**configuration epoch**, which is never a leadership term (section 10.2).
 
 CRC-8 is SAE-J1850: polynomial `0x1D`, initial value `0xFF`, final XOR `0xFF`.
 
 A receiver rejects a frame whose identifier is unknown, whose DLC is not 8,
 whose version byte does not match, whose CRC fails, whose source id is out of
-range, or whose source id disagrees with the identifier.
+range, or whose source id disagrees with the identifier. For a non-configuration
+frame it additionally rejects a role byte above 2 or a state byte above 3. For a
+configuration frame it instead rejects a stage outside 1..4 and a membership
+mask that is empty or names a node outside 1..3.
 
 SAFE cause codes: 1 split-brain, 2 no-quorum, 3 protocol error. Code 3 is
 RESERVED / NOT IMPLEMENTED in the current host demonstrator: a receiver
@@ -217,6 +235,21 @@ messages that would violate term monotonicity or restore expired authority:
 The function `mosaik_get_last_reject_reason()` reports the rejection cause
 for test instrumentation.
 
+**Quorum (Lot 5).** Quorum is taken over the node's own committed membership
+mask, not over `cfg.cluster_size`:
+
+```
+quorum(mask) = popcount(mask) / 2 + 1
+```
+
+`cfg.cluster_size` is a legacy boot parameter since Lot 5 and decides nothing.
+While a successor configuration has been accepted but not yet committed, an
+election and a leadership lease each require a quorum of the committed
+membership **and** a quorum of the accepted successor (section 10.4).
+Historical descriptions of a fixed three-node quorum elsewhere in this
+document and in the Lot 2 reports describe the behaviour before Lot 5 and are
+retained as history.
+
 **Single-leader invariant (REQ-002).** A node grants at most one vote per term.
 A node observing any consensus-bearing message (heartbeat, vote request,
 vote grant, acknowledgement) with a higher term adopts it and steps down. A
@@ -268,10 +301,14 @@ retry backoff, does not return to NOMINAL. A dropped SAFE frame is absence
 of local evidence; no remote state is inferred from anything but received
 frames.
 
-**Crash and restart (Lot 2D).** A crashed node transmits, receives and
+**Crash and restart (Lot 2D, Lot 5).** A crashed node transmits, receives and
 services nothing. A restarted node starts from term 0 with no vote and no
 knowledge of the cluster; it adopts the current term from the first
-higher-term message it receives and cannot regain former authority.
+higher-term message it receives and cannot regain former authority. Since
+Lot 5 it does reload its own committed configuration and acceptance binding
+from its host-model configuration store (section 10.7); nothing else is
+restored, and a node removed by a committed configuration is therefore still
+removed after a restart.
 
 ## 8. Assumed fault model
 
@@ -295,5 +332,137 @@ faults, clock drift beyond the tolerance implied by the timeout margins.
 | **Lot 2D: crash, restart, candidate retry backoff** | **7** | **TC-021 to TC-034** |
 | **Lot 3: SAFE contract, DEGRADED evidence, recovery around SAFE, one-vote erratum** | **5, 7** | **TC-035 to TC-050** |
 | **Lot 4: election does not degrade, SAFE term not adopted, state metadata non-authoritative** | **5, 7** | **TC-051 to TC-060** |
+| **Lot 5: membership and quorum reconfiguration** | **4, 5, 10** | **TC-061 to TC-090** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.
+
+---
+
+## 10. Membership and quorum reconfiguration (Lot 5)
+
+Before Lot 5 membership was the configuration parameter `cluster_size`,
+copied once at initialisation and never changed. Since Lot 5 membership is
+an explicit committed value that a distributed transaction can change at run
+time. Reachability is never membership: loss of contact with a peer is not
+evidence that the peer has ceased to be a member.
+
+### 10.1 Committed membership
+
+A three-bit voter mask, bit `n-1` for node `n`. The masks a node may commit
+to are the subsets of the three nodes with at least two members: `{1,2}`,
+`{1,3}`, `{2,3}` and `{1,2,3}`. A single-node membership is refused by the
+handler and by the request interface, because it would reduce quorum to one
+and let an isolated node appoint itself.
+
+### 10.2 Configuration epoch
+
+A 16-bit membership epoch, initial value 1, advancing by exactly one per
+committed transaction. It is compared explicitly and is never read as a
+leadership term, and no leadership term is ever read as an epoch. Epochs do
+not wrap: at the last representable epoch a node refuses to start a
+successor rather than rolling round to zero.
+
+A committed configuration is identified by the pair
+`(configuration epoch, membership mask)`.
+
+### 10.3 The transaction
+
+| Stage | Byte 2 | Direction | Meaning |
+|---|---|---|---|
+| PROPOSE | 1 | proposer to members | this `(epoch+1, mask)` is proposed |
+| ACCEPT | 2 | member to proposer | acceptance bound to that exact pair; byte 6 names the proposer |
+| COMMIT | 3 | proposer to members | the pair is committed |
+| ANNOUNCE | 4 | any node, every five heartbeat periods | this is my committed `(epoch, mask)` |
+
+An external command starts the transaction on a node that is a committed
+member, holds valid leadership authority, has no transaction pending, and
+names a valid mask containing itself that differs from the committed one and
+does not conflict with an acceptance it has already given. The command
+commits nothing by itself.
+
+A PROPOSE is honoured only from a node in the receiver's committed
+membership. A receiver that is itself a member additionally requires the
+proposer to be the leader it currently follows; a receiver that is not a
+member has no meaningful leader and accepts from any member. An ACCEPT
+counts when it comes from a node of either configuration of the transaction,
+because a node the proposal adds is exactly what the new quorum needs.
+
+### 10.4 Joint quorum
+
+Quorum is taken over a mask: `quorum(mask) = popcount(mask) / 2 + 1`.
+
+A successor is committed only when the acceptances actually received satisfy
+a quorum of the old configuration **and** a quorum of the new one. A majority
+of the old configuration alone is not sufficient: it would install the
+smaller quorum while nodes that must still be counted under the old
+configuration have promised nothing.
+
+While an acceptance is pending, the same conjunction governs elections and
+the leadership lease.
+
+### 10.5 Participation, candidacy, elections and the lease
+
+Taking part in consensus and standing for election are different. A node
+takes part — votes, acknowledges, is counted — while it belongs to **either**
+configuration of a pending transaction. A node may stand for election only
+while it belongs to **every** configuration that might currently be in force.
+
+A vote from outside the participation set is never counted. A leader's
+authority requires acknowledgements actually received, in its current term
+and younger than one heartbeat period, forming a quorum as in section 10.4;
+outbound traffic never counts. A node that commits a configuration excluding
+it drops any candidacy and any leadership in the same step.
+
+### 10.6 Removed and re-admitted nodes
+
+A node excluded by a committed configuration becomes passive: it neither
+stands for election nor retries one, and the remaining members refuse its
+heartbeats, acknowledgements, vote requests, vote grants and any leadership
+term it announces. It is **not** forced into SAFE; exclusion from the
+membership and FDIR are different concepts, and it keeps its timers, term and
+vote memory.
+
+Its SAFE announcements remain fault evidence and are still recorded by peers.
+Membership gates consensus, not fault reporting.
+
+Re-admission restores membership only. It refreshes no acknowledgement
+evidence, no vote memory and no heartbeat replay state.
+
+### 10.7 Host-model persistence
+
+Each node owns a configuration store holding what that node itself wrote:
+its committed `(epoch, mask)` and its single acceptance binding for the next
+epoch. It is reloaded at cold restart. No other node can read it and nothing
+in it is derived from topology. An empty, malformed or single-node store is
+reset to the initial configuration.
+
+**Host model only.** Term, vote and SAFE state remain unpersisted. This is
+not non-volatile-memory validation, not a power-loss atomicity argument and
+not flight persistence.
+
+### 10.8 Replay, idempotence and conflicts
+
+An epoch below the committed one is refused as superseded; an epoch above
+`committed + 1` is refused for want of transition context; the same epoch
+with the same mask is an idempotent duplicate; the same epoch with a
+different mask is refused and recorded as an observed inconsistency. A node
+binds at most one successor per epoch, and that binding is persisted, so two
+different successors of one epoch can never both be agreed.
+
+### 10.9 Repair of a lost commit
+
+There is no reliable broadcast. A commit may reach nobody, one participant or
+all. The periodic announcement of section 10.3 repairs a lost commit, because
+a member's announcement for `epoch + 1` is admissible. A node that a
+configuration removed cannot propagate that configuration, since an
+announcement must name a mask containing its sender.
+
+### 10.10 Limitations
+
+A node that misses an entire epoch is not caught up automatically: later
+announcements are unsupported future epochs for it, and recovery requires an
+operator. Conflicting acceptance bindings for one epoch can deadlock that
+epoch permanently, because there is no prepare-and-adopt phase by which a new
+proposer would adopt the highest accepted value. Neither limitation produced
+a safety-invariant violation in the executed scenarios. See
+`LOT5_RECONFIGURATION_REPORT.md` sections 29 and 30.
