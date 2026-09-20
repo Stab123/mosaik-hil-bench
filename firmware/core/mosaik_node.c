@@ -141,6 +141,23 @@ static void emit(mosaik_node_t *n, mosaik_msg_type_t type, uint8_t arg)
     mosaik_msg_t msg;
     mosaik_frame_t frame;
 
+    /* LOT 6A, INV-TRANSPORT-NO-TX. One central gate for every
+     * protocol-originated frame that is not a CONFIG frame: heartbeat,
+     * acknowledgement, vote request, vote grant and SAFE announcement.
+     * A controller that has removed itself from the bus cannot carry a
+     * frame, so the core must not behave as though submission succeeded.
+     *
+     * last_tx_ms is deliberately NOT advanced here: nothing was
+     * transmitted, and recording a transmission that did not happen would
+     * be exactly the fabricated evidence INV-TRANSPORT-NO-FABRICATED-
+     * EVIDENCE forbids. The consequence is that when the transport returns,
+     * the node resumes at once rather than waiting out a period it spent
+     * mute. It resumes with ONE current frame; the frames suppressed during
+     * the outage are not replayed (PROTOCOL.md section 11.5). */
+    if (!mosaik_transport_can_transmit(n)) {
+        return;
+    }
+
     msg.type    = type;
     msg.src     = n->id;
     msg.version = MOSAIK_PROTO_VERSION;
@@ -164,6 +181,13 @@ static void emit_config(mosaik_node_t *n, mosaik_cfg_stage_t stage, uint16_t epo
 {
     mosaik_msg_t msg;
     mosaik_frame_t frame;
+
+    /* LOT 6A, INV-TRANSPORT-NO-TX. The same gate on the configuration
+     * path, which covers PROPOSE, ACCEPT, COMMIT and ANNOUNCE. A membership
+     * transaction is not exempt from physics. */
+    if (!mosaik_transport_can_transmit(n)) {
+        return;
+    }
 
     msg.type      = MOSAIK_MSG_CONFIG;
     msg.src       = n->id;
@@ -855,16 +879,43 @@ void mosaik_tick(mosaik_node_t *node, uint32_t now_ms)
     start_election(node);
 }
 
-/* LOT 6A: local transport status reporting.
+/* LOT 6A: local transport status reporting, and the single state change the
+ * protocol makes because of it.
  *
- * RED BASELINE. These three functions are the complete LOT 6A transport
- * interface and they are deliberately INERT: the status is recorded and can
- * be read back, and NOTHING in emit(), emit_config(), mosaik_on_rx(),
- * mosaik_tick() or mosaik_has_valid_leadership_authority() consults it.
- * A bus-off node therefore still hands frames to its transmit callback and
- * still reports valid leadership authority until its lease expires. That is
- * the defect TC-092, TC-093, TC-096, TC-097 and TC-098 capture. Correcting
- * it is LOT 6A GREEN and is NOT part of this commit. */
+ * WHAT THIS FUNCTION DOES: it records the status, and if the reported status
+ * is not transmit-capable it expires this node's leadership lease.
+ *
+ * WHAT IT DELIBERATELY DOES NOT DO, and must never do
+ * (INV-TRANSPORT-NO-FABRICATED-EVIDENCE, INV-TRANSPORT-NOT-FDIR):
+ *   - it does not touch term, voted_for, voted_term or vote_mask;
+ *   - it does not touch committed_epoch, committed_mask, the acceptance
+ *     binding or the store: a transport fault is NOT a reconfiguration, and
+ *     a mute node is not a removed node;
+ *   - it does not touch state, so it neither enters nor clears SAFE and
+ *     neither sets nor clears DEGRADED;
+ *   - it does not touch safe_evidence_mask or last_safe_rx_ms: a local
+ *     transport fault is not a peer SAFE observation;
+ *   - it does not touch last_ack_rx_ms, last_hb_*, last_ack_* or
+ *     last_quorum_contact_ms, so it creates and destroys no evidence;
+ *   - it does not change role, does not start an election and does not
+ *     nominate any other node as leader. It knows nothing about peers.
+ *
+ * WHY THE LEASE IS EXPIRED RATHER THAN THE ROLE CHANGED HERE. Expiring the
+ * lease feeds the step-down path that already exists in mosaik_tick(): the
+ * leader observes now_ms >= lease_expiry_ms and calls become_follower() at
+ * its own term, exactly as it does when a partition starves its lease. That
+ * keeps ONE mechanism for losing leadership instead of two, keeps the term
+ * untouched, invents no election, and leaves no leader role standing with
+ * permanently invalid authority. The revocation is effective immediately
+ * regardless, because mosaik_has_valid_leadership_authority() also refuses a
+ * mute transport directly.
+ *
+ * WHY EXPIRING THE LEASE MATTERS ON TOP OF THAT GUARD: the expiry is what
+ * makes the revocation outlive the fault. When the transport later returns
+ * UP, the lease is still expired, so authority does not spring back. It can
+ * only return through a renewal earned by acknowledgements actually received
+ * after recovery, or through a new election. Transport recovery is not
+ * leadership recovery. */
 void mosaik_set_transport_status(mosaik_node_t *node, uint32_t now_ms,
                                  mosaik_transport_status_t status)
 {
@@ -877,6 +928,14 @@ void mosaik_set_transport_status(mosaik_node_t *node, uint32_t now_ms,
     }
     node->transport_status    = (uint8_t)status;
     node->transport_status_ms = now_ms;
+
+    /* INV-TRANSPORT-NO-MUTE-AUTHORITY and
+     * INV-TRANSPORT-RECOVERY-NO-AUTHORITY. Idempotent, and harmless on a
+     * node that holds no authority: the lease is only ever read under the
+     * leader role. */
+    if (!mosaik_transport_can_transmit(node)) {
+        node->lease_expiry_ms = now_ms;
+    }
 }
 
 mosaik_transport_status_t mosaik_get_transport_status(const mosaik_node_t *node)
@@ -893,6 +952,25 @@ bool mosaik_transport_can_transmit(const mosaik_node_t *node)
 bool mosaik_has_valid_leadership_authority(const mosaik_node_t *node)
 {
     if (node->role != MOSAIK_ROLE_LEADER) {
+        return false;
+    }
+    /* LOT 6A, INV-TRANSPORT-NO-MUTE-AUTHORITY. Valid leadership authority
+     * requires BOTH an unexpired lease AND a locally transmit-capable
+     * transport. One rule, two conjuncts.
+     *
+     * The lease is evidence that a quorum was reachable in the recent PAST.
+     * Local muteness is evidence about the PRESENT, and it is strictly
+     * stronger: a leader that cannot put a frame on the bus cannot lead,
+     * whatever it was able to do 100 ms ago. Past evidence never overrides
+     * stronger current local evidence.
+     *
+     * This conjunct is the guard; mosaik_set_transport_status() separately
+     * expires the lease so that the revocation SURVIVES recovery
+     * (INV-TRANSPORT-RECOVERY-NO-AUTHORITY). The guard alone would not:
+     * an outage shorter than the lease would end with the lease still
+     * running and authority silently restored, which is exactly the
+     * counterexample TC-096 captured. */
+    if (!mosaik_transport_can_transmit(node)) {
         return false;
     }
     return node->now_ms < node->lease_expiry_ms;
