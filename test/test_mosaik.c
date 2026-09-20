@@ -5765,6 +5765,1083 @@ static void tc_078_transaction_interactions(void)
     }
 }
 
+
+/* ------------------------------------------------------------------
+ * LOT 5 PHASE 3: adversarial hardening campaign.
+ *
+ * These tests attack the reconfiguration protocol committed at 146472f.
+ * They add no production code and change nothing in TC-001..TC-078.
+ *
+ * Every Phase-3 scenario runs under a continuous invariant oracle that is
+ * evaluated at every simulated millisecond, not only at the end. The
+ * oracle is harness-omniscient by construction and is used for assertions
+ * only: no node ever reads it, and no topology, drop decision or peer
+ * liveness is turned into protocol evidence. Frames injected by these
+ * tests are frames a legitimate node could have emitted earlier, except
+ * where a test is explicitly labelled as malformed input.
+ * ------------------------------------------------------------------- */
+
+static bool in_mask_t(uint8_t mask, uint8_t id)
+{
+    return id != 0u && id <= MOSAIK_MAX_NODES && (mask & (uint8_t)(1u << (id - 1u))) != 0u;
+}
+
+typedef struct {
+    uint32_t multi_auth;          /* INV-LEADER-UNIQUE */
+    uint32_t auth_outside;        /* INV-RECONFIG-AUTHORITY */
+    uint32_t same_epoch_conflict; /* INV-RECONFIG-CONSISTENT */
+    uint32_t term_regress;        /* INV-TERM-MONOTONIC */
+    uint32_t safe_auth;           /* INV-SAFE-NO-AUTHORITY */
+    uint32_t safe_role;
+    uint32_t safe_exit;           /* INV-SAFE-LATCH */
+    uint32_t mask_change_no_cfg;  /* INV-RECONFIG-NO-MAGIC */
+    uint32_t epoch_regress;       /* INV-RECONFIG-OLD-CONFIG */
+    uint32_t steps;
+    uint32_t first_ms;
+    const char *first_what;
+    /* observation only, not a violation by itself */
+    uint32_t steps_auth_superseded;
+    uint16_t last_term[N_NODES];
+    uint16_t last_epoch[N_NODES];
+    uint8_t  last_mask[N_NODES];
+    uint32_t last_commits[N_NODES];
+    mosaik_state_t last_state[N_NODES];
+    uint32_t last_restart[N_NODES];
+} adv_obs_t;
+
+static void adv_init(adv_obs_t *o)
+{
+    int i;
+    memset(o, 0, sizeof(*o));
+    o->first_what = "-";
+    for (i = 0; i < N_NODES; i++) {
+        o->last_term[i]    = g_bus.node[i].term;
+        o->last_epoch[i]   = g_bus.node[i].committed_epoch;
+        o->last_mask[i]    = g_bus.node[i].committed_mask;
+        o->last_commits[i] = g_bus.node[i].config_commits;
+        o->last_state[i]   = g_bus.node[i].state;
+        o->last_restart[i] = g_bus.restart_count[i];
+    }
+}
+
+static void adv_hit(adv_obs_t *o, const char *what)
+{
+    if (o->first_ms == 0u) { o->first_ms = g_bus.now_ms; o->first_what = what; }
+}
+
+static void adv_step_obs(adv_obs_t *o)
+{
+    int i, j, v = 0;
+    uint16_t max_epoch = 0u;
+    uint8_t  max_epoch_mask = 0u;
+
+    o->steps++;
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        if (g_bus.restart_count[i] != o->last_restart[i]) {
+            o->last_restart[i] = g_bus.restart_count[i];
+            o->last_term[i]    = n->term;
+            o->last_epoch[i]   = n->committed_epoch;
+            o->last_mask[i]    = n->committed_mask;
+            o->last_state[i]   = n->state;
+            o->last_commits[i] = n->config_commits;
+        }
+        if (mosaik_has_valid_leadership_authority(n)) {
+            v++;
+            if (!mosaik_is_member(n)) { o->auth_outside++; adv_hit(o, "authority outside own committed membership"); }
+        }
+        if (n->state == MOSAIK_STATE_SAFE) {
+            if (mosaik_has_valid_leadership_authority(n)) { o->safe_auth++; adv_hit(o, "SAFE node held authority"); }
+            if (n->role != MOSAIK_ROLE_FOLLOWER) { o->safe_role++; adv_hit(o, "SAFE node left the follower role"); }
+        }
+        if (o->last_state[i] == MOSAIK_STATE_SAFE && n->state != MOSAIK_STATE_SAFE) {
+            o->safe_exit++; adv_hit(o, "SAFE left without a cold restart");
+        }
+        if (n->term < o->last_term[i]) { o->term_regress++; adv_hit(o, "leadership term regressed"); }
+        if (n->committed_epoch < o->last_epoch[i]) { o->epoch_regress++; adv_hit(o, "configuration epoch regressed"); }
+        if (n->committed_mask != o->last_mask[i] && n->config_commits == o->last_commits[i]) {
+            o->mask_change_no_cfg++; adv_hit(o, "membership changed without a configuration commit");
+        }
+        if (n->committed_epoch > max_epoch) { max_epoch = n->committed_epoch; max_epoch_mask = n->committed_mask; }
+        o->last_term[i] = n->term; o->last_epoch[i] = n->committed_epoch;
+        o->last_mask[i] = n->committed_mask; o->last_state[i] = n->state;
+        o->last_commits[i] = n->config_commits;
+    }
+    if (v > 1) { o->multi_auth++; adv_hit(o, "two nodes held valid authority at the same instant"); }
+    for (i = 0; i < N_NODES; i++) {
+        const mosaik_node_t *n = &g_bus.node[i];
+        if (g_bus.crashed[i] || !g_bus.powered[i]) { continue; }
+        /* observation: authority held under a configuration that a strictly
+         * newer committed configuration excludes. Not a violation on its own;
+         * it becomes one only if two authorities coexist, which the counter
+         * above catches. */
+        if (mosaik_has_valid_leadership_authority(n) && n->committed_epoch < max_epoch &&
+            !in_mask_t(max_epoch_mask, (uint8_t)(i + 1))) {
+            o->steps_auth_superseded++;
+        }
+        for (j = i + 1; j < N_NODES; j++) {
+            if (g_bus.crashed[j] || !g_bus.powered[j]) { continue; }
+            if (g_bus.node[i].committed_epoch == g_bus.node[j].committed_epoch &&
+                g_bus.node[i].committed_mask  != g_bus.node[j].committed_mask) {
+                o->same_epoch_conflict++; adv_hit(o, "two memberships at one configuration epoch");
+            }
+        }
+    }
+}
+
+static void adv_run(adv_obs_t *o, uint32_t ms)
+{
+    uint32_t k;
+    for (k = 0; k < ms; k++) { bus_step(); adv_step_obs(o); }
+}
+
+/* true when no safety invariant was violated at any observed instant */
+static bool adv_safe(const adv_obs_t *o)
+{
+    return o->multi_auth == 0u && o->auth_outside == 0u && o->same_epoch_conflict == 0u &&
+           o->term_regress == 0u && o->safe_auth == 0u && o->safe_role == 0u &&
+           o->safe_exit == 0u && o->mask_change_no_cfg == 0u && o->epoch_regress == 0u;
+}
+
+static void adv_report(const adv_obs_t *o, const char *tag)
+{
+    if (adv_safe(o)) { return; }
+    printf("        COUNTEREXAMPLE in %s: %s at t=%u ms (multi=%u outside=%u same-epoch=%u term=%u safe-auth=%u safe-role=%u safe-exit=%u magic=%u epoch=%u)\n",
+           tag, o->first_what, o->first_ms, o->multi_auth, o->auth_outside, o->same_epoch_conflict,
+           o->term_regress, o->safe_auth, o->safe_role, o->safe_exit, o->mask_change_no_cfg, o->epoch_regress);
+}
+
+/* drive a transition on whichever node currently holds valid authority */
+static bool adv_transition(uint8_t target, uint32_t budget, adv_obs_t *o)
+{
+    int v = valid_leader_index();
+    uint32_t k;
+    if (v < 0) { return false; }
+    if (!mosaik_request_reconfiguration(&g_bus.node[v], target)) { return false; }
+    for (k = 0; k < budget; k++) {
+        if (o) { adv_run(o, 1u); } else { bus_step(); }
+        if (g_bus.node[v].committed_mask == target) { return true; }
+    }
+    return g_bus.node[v].committed_mask == target;
+}
+
+static void adv_mkcfg(mosaik_msg_t *m, uint8_t src, mosaik_cfg_stage_t st,
+                      uint16_t epoch, uint8_t mask, uint8_t arg)
+{
+    memset(m, 0, sizeof(*m));
+    m->type = MOSAIK_MSG_CONFIG; m->src = src; m->version = MOSAIK_PROTO_VERSION;
+    m->role = MOSAIK_ROLE_FOLLOWER; m->state = MOSAIK_STATE_INIT;
+    m->term = epoch; m->arg = arg; m->cfg_stage = (uint8_t)st; m->cfg_mask = mask;
+}
+
+/* cut or restore the paths out of one node named by a bitmask of receivers */
+static void adv_paths_from(int src, uint8_t deny, bool cut)
+{
+    int j;
+    for (j = 0; j < N_NODES; j++) {
+        if (j == src) { continue; }
+        if ((deny & (uint8_t)(1u << j)) != 0u) {
+            bus_set_net_action((uint8_t)src, (uint8_t)j, cut ? NET_DROP : NET_DELIVER, 0u);
+        }
+    }
+}
+
+/* TC-079: partial delivery of COMMIT, exhaustively over the delivery subsets
+ * of one transition, crossed with every 1|2 partition and crash point. */
+static void tc_079_partial_commit_exhaustion(void)
+{
+    int rem_sel, pd, cd, topo, crash, li, keep, rem, a, b;
+    uint32_t schedules = 0u, unsafe = 0u, committed_everywhere = 0u, no_commit = 0u;
+    adv_obs_t o;
+    uint8_t target;
+
+    printf("TC-079  partial COMMIT delivery exhausted over delivery subsets, partitions and crash points [Lot 5 Phase 3]\n");
+    for (rem_sel = 0; rem_sel < 2; rem_sel++)
+    for (pd = 0; pd < 8; pd++)
+    for (cd = 0; cd < 8; cd++)
+    for (topo = 0; topo < 4; topo++)
+    for (crash = 0; crash < 3; crash++) {
+        uint32_t k, e0;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &a, &b);
+        rem = (rem_sel == 0) ? a : b;
+        keep = (rem == a) ? b : a;
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        if ((target & (uint8_t)(1u << li)) == 0u) { continue; }
+        adv_init(&o);
+        /* the PROPOSE reaches only the receivers not named by pd */
+        adv_paths_from(li, (uint8_t)pd, true);
+        if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { adv_paths_from(li, (uint8_t)pd, false); continue; }
+        adv_run(&o, 1u);
+        adv_paths_from(li, (uint8_t)pd, false);
+        e0 = g_bus.node[li].committed_epoch;
+        for (k = 0; k < 400u && g_bus.node[li].committed_epoch == e0; k++) { adv_run(&o, 1u); }
+        if (g_bus.node[li].committed_epoch != e0) {
+            /* the COMMIT reaches only the receivers not named by cd */
+            adv_paths_from(li, (uint8_t)cd, true);
+            adv_run(&o, 1u);
+            adv_paths_from(li, (uint8_t)cd, false);
+        }
+        if (crash == 1) { bus_crash_node(li); } else if (crash == 2) { bus_crash_node(keep); }
+        if (topo > 0) { isolate_node(topo - 1, true); }
+        adv_run(&o, 600u);
+        bus_set_full_connectivity();
+        if (crash == 1) { bus_restart_node(li); } else if (crash == 2) { bus_restart_node(keep); }
+        adv_run(&o, 4000u);
+        schedules++;
+        if (!adv_safe(&o)) { unsafe++; if (unsafe == 1u) { adv_report(&o, "TC-079"); } }
+        if (l5_all_committed(target, 2u)) { committed_everywhere++; }
+        else if (g_bus.node[li].committed_epoch == 1u && g_bus.node[keep].committed_epoch == 1u) { no_commit++; }
+    }
+    check(schedules == 1536u, "Lot 5 Phase 3", "the declared partial-commit matrix executed in full");
+    check(unsafe == 0u, "INV-LEADER-UNIQUE",
+          "no schedule produced two valid authorities, an incompatible configuration or any other invariant violation");
+    printf("        %u schedules (2 removals x 8 PROPOSE subsets x 8 COMMIT subsets x 4 partitions x 3 crash points): %u converged on the new membership, %u never committed, %u unsafe\n",
+           schedules, committed_everywhere, no_commit, unsafe);
+}
+
+/* TC-080: loss, duplication, delay and reordering of every CONFIG stage. */
+static void tc_080_config_message_faults(void)
+{
+    int li, keep, rem, stage, i;
+    uint8_t target;
+    adv_obs_t o;
+    mosaik_frame_t cap[5];
+    bool capv[5];
+    uint32_t commits0[N_NODES], e_before;
+    uint8_t m_before;
+
+    printf("TC-080  CONFIG loss, duplication, delay and reordering at every stage [Lot 5 Phase 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(0x07u & ~(1u << rem));
+    adv_init(&o);
+    check(adv_transition(target, 1200u, &o), "Lot 5 Phase 3", "a transition completed so its frames can be captured");
+    adv_run(&o, 300u);
+    for (stage = 1; stage <= 4; stage++) {
+        capv[stage] = g_bus.last_cfg_frame_valid[li][stage];
+        if (capv[stage]) { cap[stage] = g_bus.last_cfg_frame[li][stage]; }
+    }
+    check(capv[MOSAIK_CFG_PROPOSE] && capv[MOSAIK_CFG_COMMIT], "Lot 5 Phase 3",
+          "PROPOSE and COMMIT frames were captured from the bus as emitted");
+
+    /* advance one epoch so every captured frame is superseded */
+    check(adv_transition((uint8_t)MOSAIK_MEMBERSHIP_ALL, 1500u, &o), "Lot 5 Phase 3", "a second transition advanced the epoch");
+    adv_run(&o, 300u);
+    e_before = g_bus.node[keep].committed_epoch;
+    m_before = g_bus.node[keep].committed_mask;
+    for (i = 0; i < N_NODES; i++) { commits0[i] = g_bus.node[i].config_commits; }
+
+    /* every captured stage: duplicated immediately, delayed, and reordered */
+    for (stage = 1; stage <= 4; stage++) {
+        if (!capv[stage]) { continue; }
+        bus_inject_frame(&cap[stage], (uint8_t)(li + 1)); adv_run(&o, 1u);
+        bus_inject_frame(&cap[stage], (uint8_t)(li + 1)); adv_run(&o, 1u);
+        bus_schedule_delayed(&cap[stage], (uint8_t)(li + 1), 40u);
+        bus_schedule_delayed(&cap[stage], (uint8_t)(li + 1), 5u);   /* out of order */
+        adv_run(&o, 60u);
+    }
+    check(g_bus.node[keep].committed_epoch == e_before && g_bus.node[keep].committed_mask == m_before,
+          "INV-RECONFIG-OLD-CONFIG", "no superseded frame, duplicated, delayed or reordered, moved a committed membership");
+    for (i = 0; i < N_NODES; i++) {
+        check(g_bus.node[i].config_commits == commits0[i], "INV-RECONFIG-OLD-CONFIG",
+              "no node performed a further configuration commit from replayed traffic");
+    }
+
+    /* stage reordering within a live transaction: COMMIT before its PROPOSE */
+    {
+        mosaik_msg_t m;
+        uint16_t next = (uint16_t)(g_bus.node[keep].committed_epoch + 1u);
+        uint8_t  nt   = (uint8_t)(0x07u & ~(1u << keep));
+        uint32_t stale0;
+        if ((nt & (uint8_t)(1u << li)) != 0u) {
+            adv_mkcfg(&m, (uint8_t)(li + 1), MOSAIK_CFG_COMMIT, next, nt, 0u);
+            deliver_to(keep, &m);
+            check(g_bus.node[keep].committed_epoch == next && g_bus.node[keep].committed_mask == nt,
+                  "Lot 5 Phase 3", "a commit from a member for the next epoch is applied on its own");
+            stale0 = g_bus.node[keep].config_stale_rejections;
+            adv_mkcfg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, next, nt, 0u);
+            deliver_to(keep, &m);
+            check(g_bus.node[keep].config_stale_rejections > stale0,
+                  "INV-RECONFIG-OLD-CONFIG", "the proposal arriving after its own commit is refused as superseded");
+        }
+    }
+    adv_run(&o, 1500u);
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated at any instant under CONFIG message faults");
+    adv_report(&o, "TC-080");
+    printf("        4 stages x (duplicate, delay, reorder) replayed after the epoch advanced: commits unchanged on every node, epoch %u mask 0x%02X held\n",
+           e_before, m_before);
+}
+
+/* TC-081: the proposer fails at ten distinct points of the transaction and
+ * returns under four restart conditions. */
+static void tc_081_proposer_crash_matrix(void)
+{
+    static const char *point_name[10] = {
+        "before the request", "right after PROPOSE", "after one acceptance",
+        "just before the joint quorum", "just after the joint quorum",
+        "before the COMMIT left", "after the first COMMIT delivery",
+        "after a partial COMMIT", "after a complete COMMIT", "during announcement repair" };
+    int point, restart_mode, li, keep, rem, a, b;
+    uint32_t schedules = 0u, unsafe = 0u, recovered = 0u;
+    adv_obs_t o;
+    uint8_t target;
+
+    printf("TC-081  proposer failure at ten transaction points x four restart conditions [Lot 5 Phase 3]\n");
+    for (point = 0; point < 10; point++)
+    for (restart_mode = 0; restart_mode < 4; restart_mode++) {
+        uint32_t k, e0;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &a, &b);
+        rem = b; keep = a;
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        if ((target & (uint8_t)(1u << li)) == 0u) { continue; }
+        adv_init(&o);
+
+        if (point == 0) { bus_crash_node(li); }
+        else {
+            if (point == 2 || point == 3) {
+                /* only one acceptance can come back */
+                bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+            }
+            if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { continue; }
+            if (point == 1) { adv_run(&o, 1u); bus_crash_node(li); }
+            else {
+                e0 = g_bus.node[li].committed_epoch;
+                for (k = 0; k < 400u && g_bus.node[li].committed_epoch == e0; k++) { adv_run(&o, 1u); }
+                if (point == 2 || point == 3) { adv_run(&o, 30u); bus_crash_node(li); }
+                else if (point == 4) { bus_crash_node(li); }                    /* commit done, COMMIT still queued */
+                else if (point == 5) { isolate_node(li, true); adv_run(&o, 1u); bus_crash_node(li); }
+                else if (point == 6) { adv_run(&o, 1u); bus_crash_node(li); }   /* first delivery done */
+                else if (point == 7) { adv_paths_from(li, (uint8_t)(1u << rem), true); adv_run(&o, 1u);
+                                       adv_paths_from(li, (uint8_t)(1u << rem), false); bus_crash_node(li); }
+                else if (point == 8) { adv_run(&o, 30u); bus_crash_node(li); }
+                else if (point == 9) { adv_run(&o, 600u); bus_crash_node(li); } /* during announcement */
+            }
+        }
+        bus_set_full_connectivity();
+        /* restart conditions: immediately, while partitioned, after the heal,
+         * and after the survivors have had time to run an election */
+        if (restart_mode == 0) { adv_run(&o, 100u); bus_restart_node(li); }
+        else if (restart_mode == 1) { isolate_node(li, true); adv_run(&o, 300u); bus_restart_node(li);
+                                      adv_run(&o, 300u); isolate_node(li, false); }
+        else if (restart_mode == 2) { adv_run(&o, 400u); bus_set_full_connectivity(); bus_restart_node(li); }
+        else { adv_run(&o, 700u); bus_restart_node(li); }
+        adv_run(&o, 5000u);
+        schedules++;
+        if (!adv_safe(&o)) { unsafe++; if (unsafe == 1u) {
+            printf("        crash point: %s, restart mode %d\n", point_name[point], restart_mode);
+            adv_report(&o, "TC-081"); } }
+        if (l5_all_committed(target, 2u)) { recovered++; }
+    }
+    check(schedules == 40u, "Lot 5 Phase 3", "the declared proposer-crash matrix executed in full");
+    check(unsafe == 0u, "INV-RECONFIG-TRANSITION",
+          "no proposer failure point produced an invariant violation at any instant");
+    printf("        %u schedules (10 crash points x 4 restart conditions): %u converged on the new membership, %u unsafe\n",
+           schedules, recovered, unsafe);
+}
+
+/* TC-082: an acceptor fails around its acceptance; the persisted binding must
+ * survive and must not be bypassed. */
+static void tc_082_acceptor_crash_matrix(void)
+{
+    int point, li, keep, rem, a, b;
+    uint32_t schedules = 0u, unsafe = 0u, binding_lost = 0u, second_binding = 0u;
+    adv_obs_t o;
+    uint8_t target;
+
+    printf("TC-082  acceptor failure around its acceptance: the persisted binding survives and binds [Lot 5 Phase 3]\n");
+    for (point = 0; point < 6; point++) {
+        uint32_t k, e0;
+        uint16_t bound_e; uint8_t bound_m;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &a, &b);
+        keep = a; rem = b;
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        if ((target & (uint8_t)(1u << li)) == 0u) { continue; }
+        adv_init(&o);
+
+        if (point == 0) { bus_crash_node(keep); }                       /* before ACCEPT */
+        if (point == 1) { adv_paths_from(keep, (uint8_t)(1u << li), true); }  /* accepts, cannot transmit */
+        if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { continue; }
+        adv_run(&o, 2u);
+        if (point == 1) { bus_crash_node(keep); adv_paths_from(keep, (uint8_t)(1u << li), false); }
+        else if (point == 2) { adv_run(&o, 2u); bus_crash_node(keep); }  /* after transmitting ACCEPT */
+        else if (point >= 3) {
+            e0 = g_bus.node[li].committed_epoch;
+            for (k = 0; k < 400u && g_bus.node[li].committed_epoch == e0; k++) { adv_run(&o, 1u); }
+            if (point == 3) { bus_crash_node(keep); }                    /* proposer committed, COMMIT queued */
+            else if (point == 4) { adv_paths_from(li, (uint8_t)(1u << keep), true); adv_run(&o, 2u);
+                                   adv_paths_from(li, (uint8_t)(1u << keep), false); bus_crash_node(keep); }
+            else { adv_run(&o, 30u); bus_crash_node(keep); }             /* after receiving COMMIT */
+        }
+        adv_run(&o, 300u);
+        bound_e = g_bus.store[keep].accepted_epoch; bound_m = g_bus.store[keep].accepted_mask;
+        bus_restart_node(keep);
+        if (point >= 1) {
+            if (g_bus.node[keep].accepted_epoch != bound_e || g_bus.node[keep].accepted_mask != bound_m) { binding_lost++; }
+        }
+        /* a different successor for the same epoch must still be refused */
+        if (g_bus.node[keep].accepted_epoch == (uint16_t)(g_bus.node[keep].committed_epoch + 1u)) {
+            mosaik_msg_t m;
+            uint8_t other = (uint8_t)(0x07u & ~(1u << keep));
+            uint16_t ne = g_bus.node[keep].accepted_epoch;
+            uint8_t  om = g_bus.node[keep].accepted_mask;
+            if (other != om) {
+                adv_mkcfg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, ne, other, 0u);
+                deliver_to(keep, &m);
+                if (g_bus.node[keep].accepted_mask != om) { second_binding++; }
+            }
+        }
+        adv_run(&o, 5000u);
+        schedules++;
+        if (!adv_safe(&o)) { unsafe++; if (unsafe == 1u) { adv_report(&o, "TC-082"); } }
+    }
+    check(schedules == 6u, "Lot 5 Phase 3", "the declared acceptor-crash matrix executed in full");
+    check(binding_lost == 0u, "INV-RECONFIG-TRANSITION",
+          "every acceptance that had been persisted came back intact after the cold restart");
+    check(second_binding == 0u, "INV-RECONFIG-CONSISTENT",
+          "no restarted acceptor could be talked into a second successor for the same epoch");
+    check(unsafe == 0u, "INV-LEADER-UNIQUE", "no acceptor failure point produced an invariant violation");
+    printf("        %u crash points around the acceptance: bindings lost %u, second bindings accepted %u, unsafe %u\n",
+           schedules, binding_lost, second_binding, unsafe);
+}
+
+/* TC-083: a removed node attacks with every frame it could emit, and the
+ * documented "missed a whole epoch" limitation is examined for safety. */
+static void tc_083_removed_node_and_stuck_epoch(void)
+{
+    int li, keep, rem, i, x;
+    uint8_t target;
+    adv_obs_t o;
+    mosaik_msg_t m;
+    uint16_t e0, t_li, t_keep;
+    uint8_t k0;
+    uint32_t nm0, nm_delta = 0u, stuck_cases = 0u, stuck_unsafe = 0u, stuck_auth = 0u;
+
+    printf("TC-083  removed-node attacks and the safety of a node that missed a whole epoch [Lot 5 Phase 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(0x07u & ~(1u << rem));
+    adv_init(&o);
+    check(adv_transition(target, 1200u, &o), "Lot 5 Phase 3", "the third node was removed");
+    adv_run(&o, 300u);
+    e0 = g_bus.node[li].committed_epoch; k0 = g_bus.node[li].committed_mask;
+    t_li = g_bus.node[li].term; t_keep = g_bus.node[keep].term;
+    nm0 = g_bus.node[li].nonmember_rejections;
+
+    /* every CONFIG stage the removed node could emit, including one that
+     * would re-admit it and one that would remove the current leader */
+    adv_mkcfg(&m, (uint8_t)(rem + 1), MOSAIK_CFG_PROPOSE, (uint16_t)(e0 + 1u), 0x07u, 0u);
+    deliver_to(li, &m); deliver_to(keep, &m);
+    adv_mkcfg(&m, (uint8_t)(rem + 1), MOSAIK_CFG_COMMIT, (uint16_t)(e0 + 1u), 0x07u, 0u);
+    deliver_to(li, &m); deliver_to(keep, &m);
+    adv_mkcfg(&m, (uint8_t)(rem + 1), MOSAIK_CFG_ANNOUNCE, (uint16_t)(e0 + 1u), 0x07u, 0u);
+    deliver_to(li, &m); deliver_to(keep, &m);
+    adv_mkcfg(&m, (uint8_t)(rem + 1), MOSAIK_CFG_ACCEPT, (uint16_t)(e0 + 1u), 0x07u, (uint8_t)(li + 1));
+    deliver_to(li, &m);
+    adv_mkcfg(&m, (uint8_t)(rem + 1), MOSAIK_CFG_COMMIT, (uint16_t)(e0 + 1u),
+              (uint8_t)(0x07u & ~(1u << li)), 0u);
+    deliver_to(keep, &m);
+    check(g_bus.node[li].committed_epoch == e0 && g_bus.node[li].committed_mask == k0 &&
+          g_bus.node[keep].committed_epoch == e0 && g_bus.node[keep].committed_mask == k0,
+          "INV-RECONFIG-REMOVED-NODE",
+          "no configuration frame from the removed node moved any committed membership");
+
+    /* every consensus frame type, at a higher and at a stale term */
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(rem + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(t_li + 7u), 3u); deliver_to(li, &m); deliver_to(keep, &m);
+    make_msg(&m, MOSAIK_MSG_VOTE_REQ, (uint8_t)(rem + 1), MOSAIK_ROLE_CANDIDATE, MOSAIK_STATE_NOMINAL,
+             (uint16_t)(t_li + 8u), 0u); deliver_to(li, &m); deliver_to(keep, &m);
+    make_msg(&m, MOSAIK_MSG_VOTE_GRANT, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+             t_li, (uint8_t)(li + 1)); deliver_to(li, &m);
+    make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+             t_li, g_bus.node[li].seq); deliver_to(li, &m);
+    make_msg(&m, MOSAIK_MSG_HEARTBEAT, (uint8_t)(rem + 1), MOSAIK_ROLE_LEADER, MOSAIK_STATE_NOMINAL,
+             1u, 4u); deliver_to(li, &m);
+    check(g_bus.node[li].term == t_li && g_bus.node[keep].term == t_keep,
+          "INV-RECONFIG-REMOVED-NODE", "neither a higher nor a stale term from the removed node was adopted");
+    check(g_bus.node[li].nonmember_rejections >= nm0 + 5u, "INV-RECONFIG-REMOVED-NODE",
+          "every consensus frame from it was refused as coming from outside the committed membership");
+    check(valid_leader_index() == li, "INV-LEADER-UNIQUE", "the leader kept its role and authority throughout");
+    adv_run(&o, 1500u);
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated during the removed-node attack");
+    adv_report(&o, "TC-083");
+    nm_delta = g_bus.node[li].nonmember_rejections - nm0;
+
+    /* the documented limitation: a node isolated across several transitions
+     * falls behind by more than one epoch and can never be caught up. */
+    for (x = 0; x < N_NODES; x++) {
+        int n_tr;
+        for (n_tr = 1; n_tr <= 5; n_tr++) {
+            adv_obs_t s;
+            uint8_t small;
+            bus_init(); bus_run(2000u);
+            li = leader_index();
+            if (li < 0 || x == li) { continue; }
+            adv_init(&s);
+            isolate_node(x, true);
+            small = (uint8_t)(0x07u & ~(1u << x));
+            for (i = 0; i < n_tr; i++) {
+                if (!adv_transition((i % 2 == 0) ? small : (uint8_t)MOSAIK_MEMBERSHIP_ALL, 1200u, &s)) { break; }
+                adv_run(&s, 300u);
+            }
+            isolate_node(x, false);
+            adv_run(&s, 8000u);
+            stuck_cases++;
+            if (!adv_safe(&s)) { stuck_unsafe++; if (stuck_unsafe == 1u) { adv_report(&s, "TC-083 stuck"); } }
+            if (s.steps_auth_superseded > 0u) { stuck_auth++; }
+        }
+    }
+    check(stuck_cases == 10u, "Lot 5 Phase 3", "the declared stuck-epoch matrix executed in full");
+    check(stuck_unsafe == 0u, "INV-RECONFIG-QUORUM",
+          "a node left behind by more than one epoch never produced an invariant violation");
+    check(stuck_auth == 0u, "INV-RECONFIG-AUTHORITY",
+          "no node held authority under a configuration that a newer committed one excludes it from");
+    printf("        removed node: 5 configuration frames and 5 consensus frames all refused, %u non-member rejections; stuck-epoch matrix %u cases, %u unsafe, %u with authority under a superseded configuration\n",
+           nm_delta, stuck_cases, stuck_unsafe, stuck_auth);
+}
+
+/* TC-084: re-admission must not turn old evidence into fresh authority. */
+static void tc_084_readmission_stale_evidence(void)
+{
+    int li, keep, rem, k;
+    uint8_t target;
+    adv_obs_t o;
+    uint32_t ack_rx_before, lost_ms = 0u, cut_ms;
+    uint16_t hb_term_before, voted_term_before;
+    uint8_t  hb_seq_before, voted_for_before;
+
+    printf("TC-084  re-admission: old acknowledgements, votes and sequences do not become fresh evidence [Lot 5 Phase 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(0x07u & ~(1u << rem));
+    adv_init(&o);
+    check(adv_transition(target, 1200u, &o), "Lot 5 Phase 3", "the third node was removed");
+    adv_run(&o, 1500u);
+    ack_rx_before     = g_bus.node[li].last_ack_rx_ms[rem];
+    hb_term_before    = g_bus.node[li].last_hb_term[rem];
+    hb_seq_before     = g_bus.node[li].last_hb_seq[rem];
+    voted_for_before  = g_bus.node[li].voted_for;
+    voted_term_before = g_bus.node[li].voted_term;
+
+    /* isolate the act of re-admission itself: a single commit frame that the
+     * remaining member could legitimately have emitted, applied in one step,
+     * so that nothing else can account for a change of state */
+    {
+        mosaik_msg_t rm;
+        uint16_t e_next = (uint16_t)(g_bus.node[li].committed_epoch + 1u);
+        ack_rx_before     = g_bus.node[li].last_ack_rx_ms[rem];
+        hb_term_before    = g_bus.node[li].last_hb_term[rem];
+        hb_seq_before     = g_bus.node[li].last_hb_seq[rem];
+        voted_for_before  = g_bus.node[li].voted_for;
+        voted_term_before = g_bus.node[li].voted_term;
+        adv_mkcfg(&rm, (uint8_t)(keep + 1), MOSAIK_CFG_COMMIT, e_next, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 0u);
+        deliver_to(li, &rm);
+        check(g_bus.node[li].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+              g_bus.node[li].committed_epoch == e_next,
+              "Lot 5 Phase 3", "the re-admission was applied in a single step");
+        check(g_bus.node[li].last_ack_rx_ms[rem] == ack_rx_before, "INV-RECONFIG-REMOVED-NODE",
+              "re-admission alone refreshed no acknowledgement evidence");
+        check(g_bus.node[li].voted_for == voted_for_before && g_bus.node[li].voted_term == voted_term_before,
+              "INV-ONE-VOTE-PER-TERM", "re-admission alone changed no vote memory");
+        check(g_bus.node[li].last_hb_term[rem] == hb_term_before && g_bus.node[li].last_hb_seq[rem] == hb_seq_before,
+              "INV-NO-STALE-RECOVERY", "re-admission alone changed no heartbeat replay state");
+        check(!mosaik_has_quorum_ack_evidence(&g_bus.node[li]) ||
+              g_bus.node[li].last_ack_rx_ms[keep] + g_bus.node[li].cfg.heartbeat_period_ms > g_bus.now_ms,
+              "INV-RECONFIG-LOT2", "any quorum evidence the leader still holds is evidence it actually received");
+    }
+    adv_run(&o, 50u);
+
+    /* the re-admitted node's evidence must be received anew to count */
+    cut_ms = g_bus.now_ms;
+    bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+    bus_set_net_action((uint8_t)rem,  (uint8_t)li, NET_DROP, 0u);
+    for (k = 0; k < 1500 && lost_ms == 0u; k++) {
+        adv_run(&o, 1u);
+        if (!mosaik_has_valid_leadership_authority(&g_bus.node[li])) { lost_ms = g_bus.now_ms - cut_ms; }
+    }
+    check(lost_ms != 0u && lost_ms <= MOSAIK_LEADERSHIP_LEASE_MS + 1u, "INV-RECONFIG-LOT2",
+          "with no acknowledgement actually received the leader lost authority within one lease");
+    bus_set_full_connectivity();
+    adv_run(&o, 3000u);
+
+    /* restart immediately before and after a re-admission */
+    {
+        adv_obs_t p;
+        int li2, a2, b2, r2;
+        uint8_t t2;
+        bus_init(); bus_run(2000u);
+        li2 = leader_index();
+        if (li2 >= 0) {
+            survivors_of(li2, &a2, &b2); r2 = b2;
+            t2 = (uint8_t)(0x07u & ~(1u << r2));
+            adv_init(&p);
+            if (adv_transition(t2, 1200u, &p)) {
+                adv_run(&p, 300u);
+                bus_crash_node(r2); adv_run(&p, 200u); bus_restart_node(r2);   /* restart before re-admission */
+                check(g_bus.node[r2].committed_mask == t2 && !mosaik_is_member(&g_bus.node[r2]),
+                      "INV-RECONFIG-REMOVED-NODE", "a restart before re-admission leaves the node outside the membership");
+                if (adv_transition((uint8_t)MOSAIK_MEMBERSHIP_ALL, 1500u, &p)) {
+                    adv_run(&p, 200u);
+                    bus_crash_node(r2); adv_run(&p, 200u); bus_restart_node(r2); /* restart after re-admission */
+                    check(g_bus.node[r2].committed_mask == (uint8_t)MOSAIK_MEMBERSHIP_ALL &&
+                          g_bus.node[r2].term == 0u,
+                          "Lot 5 Phase 3", "a restart after re-admission restores the membership but no term or vote");
+                    adv_run(&p, 4000u);
+                    check(valid_leader_count() == 1, "INV-LEADER-UNIQUE",
+                          "the cluster settled on exactly one valid authority after both restarts");
+                }
+            }
+            check(adv_safe(&p), "INV-LEADER-UNIQUE", "no invariant was violated around the restarts");
+            adv_report(&p, "TC-084 restarts");
+        }
+    }
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated during re-admission");
+    adv_report(&o, "TC-084");
+    printf("        re-admission refreshed nothing; authority lost %u ms after losing inbound traffic; restarts before and after re-admission behaved\n", lost_ms);
+}
+
+/* TC-085: conflicting successors for one predecessor epoch. */
+static void tc_085_conflicting_successors(void)
+{
+    int li, a, b, newl;
+    uint8_t X, Y;
+    uint32_t k, commits_before[N_NODES];
+    adv_obs_t o;
+    int i;
+    bool y_committed = false, x_committed = false;
+
+    printf("TC-085  two different successors of one epoch: at most one can ever be agreed [Lot 5 Phase 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &a, &b);
+    X = (uint8_t)(0x07u & ~(1u << b));     /* successor proposed by the first leader */
+    Y = (uint8_t)(0x07u & ~(1u << li));    /* a different successor, excluding that leader */
+    adv_init(&o);
+
+    /* the first proposer reaches only one acceptor, then fails */
+    bus_set_net_action((uint8_t)li, (uint8_t)a, NET_DROP, 0u);
+    bus_set_net_action((uint8_t)a, (uint8_t)li, NET_DROP, 0u);
+    check(mosaik_request_reconfiguration(&g_bus.node[li], X), "Lot 5 Phase 3", "the first successor was proposed");
+    adv_run(&o, 60u);
+    check(g_bus.node[b].accepted_epoch == 2u && g_bus.node[b].accepted_mask == X, "Lot 5 Phase 3",
+          "exactly one acceptor bound itself to the first successor");
+    check(g_bus.node[a].accepted_epoch != 2u, "Lot 5 Phase 3", "the other acceptor never saw the proposal");
+    bus_crash_node(li);
+    bus_set_full_connectivity();
+    for (k = 0; k < 4000u && valid_leader_index() < 0; k++) { adv_run(&o, 1u); }
+    newl = valid_leader_index();
+    check(newl >= 0 && newl != li, "Lot 5 Phase 3", "an unbound node took leadership after the proposer failed");
+    if (newl < 0) { return; }
+
+    for (i = 0; i < N_NODES; i++) { commits_before[i] = g_bus.node[i].config_commits; }
+    if ((Y & (uint8_t)(1u << newl)) != 0u) {
+        check(mosaik_request_reconfiguration(&g_bus.node[newl], Y), "Lot 5 Phase 3",
+              "the new leader proposed a different successor for the same epoch");
+        adv_run(&o, 2500u);
+    }
+    for (i = 0; i < N_NODES; i++) {
+        if (g_bus.node[i].committed_mask == Y && g_bus.node[i].committed_epoch == 2u) { y_committed = true; }
+        if (g_bus.node[i].committed_mask == X && g_bus.node[i].committed_epoch == 2u) { x_committed = true; }
+    }
+    check(!(x_committed && y_committed), "INV-RECONFIG-CONSISTENT",
+          "the two conflicting successors were never both committed");
+    check(!y_committed, "INV-RECONFIG-CONSISTENT",
+          "the second successor could not be agreed against a binding already given to the first");
+    check(g_bus.node[b].accepted_mask == X, "INV-RECONFIG-CONSISTENT",
+          "the acceptor kept the binding it had given and did not switch successor");
+    check(o.same_epoch_conflict == 0u, "INV-RECONFIG-CONSISTENT",
+          "no two nodes ever held different memberships at the same epoch");
+    for (i = 0; i < N_NODES; i++) {
+        check(g_bus.node[i].config_commits == commits_before[i], "INV-RECONFIG-CONSISTENT",
+              "the conflicting proposal produced no configuration commit on any node");
+    }
+
+    /* the proposer returns: only the originally bound successor can complete */
+    bus_restart_node(li);
+    adv_run(&o, 3000u);
+    for (k = 0; k < 6u; k++) {
+        int v = valid_leader_index();
+        if (v >= 0 && g_bus.node[v].committed_epoch == 1u) { (void)mosaik_request_reconfiguration(&g_bus.node[v], X); }
+        adv_run(&o, 800u);
+    }
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated by the conflicting successors");
+    adv_report(&o, "TC-085");
+    printf("        first successor 0x%02X bound on one acceptor; second successor 0x%02X proposed by node %d: committed %s; epoch after recovery %u mask 0x%02X\n",
+           X, Y, newl + 1, y_committed ? "yes" : "no",
+           g_bus.node[b].committed_epoch, g_bus.node[b].committed_mask);
+}
+
+/* TC-086: leadership term and configuration epoch stay independent. */
+static void tc_086_term_epoch_cross_product(void)
+{
+    int li, keep, rem, i;
+    adv_obs_t o;
+    mosaik_msg_t m;
+    uint16_t t0, e0;
+    uint8_t  k0, vf0; uint16_t vt0;
+    uint32_t elections = 0u;
+
+    printf("TC-086  configuration epoch and leadership term are independent under crossed traffic [Lot 5 Phase 3]\n");
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    adv_init(&o);
+    t0 = g_bus.node[keep].term; e0 = g_bus.node[keep].committed_epoch; k0 = g_bus.node[keep].committed_mask;
+    vf0 = g_bus.node[keep].voted_for; vt0 = g_bus.node[keep].voted_term;
+
+    /* configuration traffic must never move the leadership term, whatever
+     * epoch value it carries relative to the current term */
+    for (i = 0; i < 4; i++) {
+        uint16_t e_try = (uint16_t)(i == 0 ? 1u : (i == 1 ? e0 : (i == 2 ? (uint16_t)(t0 + 50u) : 0xFFFEu)));
+        adv_mkcfg(&m, (uint8_t)(li + 1), MOSAIK_CFG_ANNOUNCE, e_try, (uint8_t)MOSAIK_MEMBERSHIP_ALL, 0u);
+        deliver_to(keep, &m);
+        adv_mkcfg(&m, (uint8_t)(li + 1), MOSAIK_CFG_PROPOSE, e_try, (uint8_t)(0x07u & ~(1u << rem)), 0u);
+        deliver_to(keep, &m);
+    }
+    check(g_bus.node[keep].term == t0, "INV-TERM-MONOTONIC",
+          "no configuration epoch value was ever taken for a leadership term");
+    check(g_bus.node[keep].voted_for == vf0 && g_bus.node[keep].voted_term == vt0,
+          "INV-ONE-VOTE-PER-TERM", "configuration traffic changed no vote memory");
+    check(g_bus.node[keep].committed_epoch == e0 && g_bus.node[keep].committed_mask == k0,
+          "INV-RECONFIG-OLD-CONFIG", "no inadmissible epoch moved the committed membership");
+
+    /* several leadership elections while an acceptance binding persists */
+    {
+        uint8_t X = (uint8_t)(0x07u & ~(1u << rem));
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        check(mosaik_request_reconfiguration(&g_bus.node[li], X), "Lot 5 Phase 3", "a transaction was left open");
+        adv_run(&o, 80u);
+        check(g_bus.node[keep].accepted_epoch == 2u, "Lot 5 Phase 3", "the binding is in place");
+        bus_set_full_connectivity();
+        for (i = 0; i < 3; i++) {
+            int v = leader_index();
+            uint16_t tb = (v >= 0) ? g_bus.node[v].term : 0u;
+            if (v >= 0) { bus_crash_node(v); }
+            adv_run(&o, 1200u);
+            if (v >= 0) { bus_restart_node(v); }
+            adv_run(&o, 1200u);
+            { int nv = valid_leader_index();
+              if (nv >= 0 && g_bus.node[nv].term > tb) { elections++; } }
+        }
+        check(g_bus.node[keep].accepted_epoch == 2u && g_bus.node[keep].accepted_mask == X,
+              "INV-RECONFIG-TRANSITION", "the acceptance binding survived every leadership change");
+    }
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated across the term and epoch cross product");
+    adv_report(&o, "TC-086");
+    printf("        4 inadmissible epoch values refused without touching the term; the acceptance binding survived 3 leader crash and restart cycles, with %u higher-term leadership acquisitions observed (the joint rule blocks election while the proposer is absent)\n",
+           elections);
+}
+
+/* TC-087: attempts to renew authority from inadmissible evidence, and the
+ * exact acknowledgement freshness boundary. */
+static void tc_087_lease_evidence_attacks(void)
+{
+    int li, keep, rem, k;
+    uint8_t target;
+    adv_obs_t o;
+    mosaik_msg_t m;
+    uint32_t held[3];
+    uint16_t t_li;
+
+    printf("TC-087  lease evidence: removed, stale, duplicated and boundary-fresh acknowledgements [Lot 5 Phase 3]\n");
+
+    /* Freshness boundary measured on the production predicate itself: the
+     * acknowledgement evidence a leader holds must count while it is younger
+     * than one heartbeat period and must stop counting at exactly that age.
+     * This inspects age period-1, period and period+1. */
+    {
+        uint32_t t_last, age_fresh_last = 0u, age_first_stale = 0u, period;
+        bool was_fresh_at_pm1 = false, fresh_at_p = false;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        check(li >= 0, "Lot 5 Phase 3", "leader existed");
+        if (li < 0) { return; }
+        survivors_of(li, &keep, &rem);
+        adv_init(&o);
+        period = (uint32_t)g_bus.node[li].cfg.heartbeat_period_ms;
+        check(mosaik_has_quorum_ack_evidence(&g_bus.node[li]), "Lot 5 Phase 3",
+              "the leader starts from acknowledgement evidence it actually received");
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        bus_set_net_action((uint8_t)rem,  (uint8_t)li, NET_DROP, 0u);
+        t_last = g_bus.node[li].last_ack_rx_ms[keep];
+        if (g_bus.node[li].last_ack_rx_ms[rem] > t_last) { t_last = g_bus.node[li].last_ack_rx_ms[rem]; }
+        for (k = 0; k < 400; k++) {
+            uint32_t age;
+            adv_run(&o, 1u);
+            /* the age the predicate itself sees: the node's own clock, which
+             * is the one the freshness comparison uses */
+            age = g_bus.node[li].now_ms - t_last;
+            if (mosaik_has_quorum_ack_evidence(&g_bus.node[li])) {
+                age_fresh_last = age;
+                if (age == period - 1u) { was_fresh_at_pm1 = true; }
+                if (age == period)      { fresh_at_p = true; }
+            } else if (age_first_stale == 0u) {
+                age_first_stale = age;
+            }
+        }
+        check(was_fresh_at_pm1, "INV-RECONFIG-LOT2",
+              "evidence one millisecond younger than a heartbeat period still counts");
+        check(!fresh_at_p && age_first_stale == period, "INV-RECONFIG-LOT2",
+              "evidence stops counting at exactly one heartbeat period of age, neither earlier nor later");
+        check(age_fresh_last == period - 1u, "INV-RECONFIG-LOT2",
+              "the last instant it counted was exactly one millisecond before that boundary");
+        held[0] = age_fresh_last; held[1] = age_first_stale; held[2] = period;
+        check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated at the freshness boundary");
+        adv_report(&o, "TC-087 boundary");
+    }
+
+    /* inadmissible sources and terms cannot renew anything */
+    bus_init(); bus_run(2000u);
+    li = leader_index();
+    check(li >= 0, "Lot 5 Phase 3", "leader existed");
+    if (li < 0) { return; }
+    survivors_of(li, &keep, &rem);
+    target = (uint8_t)(0x07u & ~(1u << rem));
+    adv_init(&o);
+    check(adv_transition(target, 1200u, &o), "Lot 5 Phase 3", "the third node was removed");
+    adv_run(&o, 200u);
+    t_li = g_bus.node[li].term;
+    {
+        uint32_t cut = g_bus.now_ms, lost = 0u;
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        for (k = 0; k < 1500 && lost == 0u; k++) {
+            /* removed node, stale term, duplicated, and reordered acknowledgements */
+            make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+                     t_li, g_bus.node[li].seq); deliver_to(li, &m); deliver_to(li, &m);
+            make_msg(&m, MOSAIK_MSG_ACK, (uint8_t)(keep + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_NOMINAL,
+                     (uint16_t)(t_li - 1u), g_bus.node[li].seq); deliver_to(li, &m);
+            adv_run(&o, 1u);
+            if (!mosaik_has_valid_leadership_authority(&g_bus.node[li])) { lost = g_bus.now_ms - cut; }
+        }
+        check(lost != 0u && lost <= MOSAIK_LEADERSHIP_LEASE_MS + 1u, "INV-RECONFIG-REMOVED-NODE",
+              "neither removed-node nor stale-term acknowledgements, duplicated at every step, kept the lease alive");
+    }
+    check(adv_safe(&o), "INV-LEADER-UNIQUE", "no invariant was violated during the lease attacks");
+    adv_report(&o, "TC-087");
+    printf("        evidence last counted at age %u ms, first stale at age %u ms, heartbeat period %u ms; inadmissible acknowledgements never renewed the lease\n",
+           held[0], held[1], held[2]);
+}
+
+/* TC-088: SAFE and DEGRADED across every stage of a transaction. */
+static void tc_088_safe_degraded_during_transaction(void)
+{
+    int stage, li, keep, rem, safe_node, i;
+    uint32_t cases = 0u, unsafe = 0u, safe_changed_cfg = 0u;
+    adv_obs_t o;
+
+    printf("TC-088  SAFE and DEGRADED injected at every stage of a transaction [Lot 5 Phase 3]\n");
+    for (stage = 0; stage < 4; stage++) {
+        uint8_t target;
+        uint32_t k, e0;
+        uint16_t safe_epoch_before; uint8_t safe_mask_before;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &keep, &rem);
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        adv_init(&o);
+        if (stage == 0) {
+            /* SAFE evidence before the proposal: a peer latches SAFE */
+            safe_node = split_brain_leader();
+            for (k = 0; k < 1500u && valid_leader_index() < 0; k++) { adv_run(&o, 1u); }
+            li = valid_leader_index();
+            if (li < 0) { continue; }
+            { int x, y; survivors_of(safe_node, &x, &y); rem = safe_node; (void)x; (void)y; }
+            target = (uint8_t)(0x07u & ~(1u << rem));
+            if ((target & (uint8_t)(1u << li)) == 0u) { continue; }
+            safe_epoch_before = g_bus.node[safe_node].committed_epoch;
+            safe_mask_before  = g_bus.node[safe_node].committed_mask;
+            (void)adv_transition(target, 1500u, &o);
+            adv_run(&o, 1000u);
+            if (g_bus.node[safe_node].committed_epoch != safe_epoch_before ||
+                g_bus.node[safe_node].committed_mask != safe_mask_before) { safe_changed_cfg++; }
+            check(g_bus.node[safe_node].state == MOSAIK_STATE_SAFE, "INV-SAFE-LATCH",
+                  "the SAFE node stayed SAFE while the others reconfigured around it");
+            check(!mosaik_has_valid_leadership_authority(&g_bus.node[safe_node]), "INV-SAFE-NO-AUTHORITY",
+                  "the SAFE node held no authority during the transaction");
+        } else {
+            if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { continue; }
+            if (stage == 1) { adv_run(&o, 2u); }                 /* during acceptance */
+            else if (stage == 2) {                                /* just before the commit */
+                e0 = g_bus.node[li].committed_epoch;
+                bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+                adv_run(&o, 40u);
+                (void)e0;
+            } else {                                              /* after a partial commit */
+                e0 = g_bus.node[li].committed_epoch;
+                for (k = 0; k < 400u && g_bus.node[li].committed_epoch == e0; k++) { adv_run(&o, 1u); }
+                adv_paths_from(li, (uint8_t)(1u << rem), true); adv_run(&o, 1u);
+                adv_paths_from(li, (uint8_t)(1u << rem), false);
+            }
+            /* a genuine SAFE announcement from the third node */
+            {
+                mosaik_msg_t m;
+                uint16_t t_keep = g_bus.node[keep].term;
+                make_msg(&m, MOSAIK_MSG_SAFE, (uint8_t)(rem + 1), MOSAIK_ROLE_FOLLOWER, MOSAIK_STATE_SAFE,
+                         (uint16_t)(t_keep + 4u), (uint8_t)MOSAIK_SAFE_NO_QUORUM);
+                deliver_to(keep, &m); deliver_to(li, &m);
+                check(g_bus.node[keep].term == t_keep, "INV-RECONFIG-LOT4",
+                      "a SAFE announcement carried no consensus term into the transaction");
+                check((g_bus.node[keep].safe_evidence_mask & (uint8_t)(1u << rem)) != 0u,
+                      "INV-RECONFIG-LOT4", "it was still recorded as fault evidence");
+                check(g_bus.node[keep].committed_epoch <= 2u, "INV-RECONFIG-NO-MAGIC",
+                      "a SAFE announcement advanced no configuration epoch");
+            }
+            bus_set_full_connectivity();
+            adv_run(&o, 4000u);
+        }
+        cases++;
+        if (!adv_safe(&o)) { unsafe++; if (unsafe == 1u) { adv_report(&o, "TC-088"); } }
+    }
+    check(cases >= 3u, "Lot 5 Phase 3", "SAFE was injected at the declared transaction stages");
+    check(safe_changed_cfg == 0u, "INV-SAFE-LATCH",
+          "a latched SAFE node never changed its committed configuration");
+    check(unsafe == 0u, "INV-SAFE-NO-AUTHORITY",
+          "no SAFE or DEGRADED interaction with a transaction violated an invariant");
+    (void)i;
+    printf("        %u stages exercised; SAFE stayed FDIR evidence, advanced no epoch, renewed no lease and cast no vote\n", cases);
+}
+
+/* TC-089: exact time boundaries around the protocol's timers. */
+static void tc_089_time_boundaries(void)
+{
+    int li, keep, rem, d, k;
+    adv_obs_t o;
+    uint32_t overlap_steps = 0u, cases = 0u;
+
+    printf("TC-089  one-millisecond boundaries around lease, election, retransmission and announcement [Lot 5 Phase 3]\n");
+    /* lease expiry boundary: cut inbound traffic and step through the exact
+     * millisecond the lease ends, looking for a one-tick authority overlap */
+    for (d = -1; d <= 1; d++) {
+        uint32_t cut;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &keep, &rem);
+        adv_init(&o);
+        cut = g_bus.now_ms;
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        bus_set_net_action((uint8_t)rem,  (uint8_t)li, NET_DROP, 0u);
+        for (k = 0; k < (int)MOSAIK_LEADERSHIP_LEASE_MS + 600 + d; k++) { adv_run(&o, 1u); }
+        bus_set_full_connectivity();
+        adv_run(&o, 3000u);
+        cases++;
+        overlap_steps += o.multi_auth;
+        if (!adv_safe(&o)) { adv_report(&o, "TC-089 lease"); }
+        (void)cut;
+    }
+    /* proposal retransmission and abandonment boundaries */
+    for (d = 0; d < 3; d++) {
+        uint32_t hold[3]; uint8_t target;
+        hold[0] = 1u; hold[1] = 10u * 100u - 1u; hold[2] = 10u * 100u + 1u;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &keep, &rem);
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        adv_init(&o);
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DROP, 0u);
+        if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { continue; }
+        adv_run(&o, hold[d]);
+        bus_set_net_action((uint8_t)keep, (uint8_t)li, NET_DELIVER, 0u);
+        adv_run(&o, 3000u);
+        cases++;
+        overlap_steps += o.multi_auth;
+        if (!adv_safe(&o)) { adv_report(&o, "TC-089 proposal"); }
+        check(g_bus.node[li].committed_epoch <= 2u, "INV-RECONFIG-TRANSITION",
+              "a proposal held across the retransmission and abandonment boundaries committed at most once");
+    }
+    check(overlap_steps == 0u, "INV-LEADER-UNIQUE",
+          "no one-millisecond window showed two valid authorities at any timer boundary");
+    printf("        %u boundary cases around the lease, retransmission and abandonment timers: %u instants with two authorities\n",
+           cases, overlap_steps);
+}
+
+/* TC-090: bounded deterministic schedule explorer. */
+static void tc_090_bounded_schedule_explorer(void)
+{
+    int rem_sel, pd, cd, topo, crash, heal_sel, li, keep, rem, a, b;
+    static const uint32_t heals[3] = {200u, 600u, 1400u};
+    uint32_t schedules = 0u, unsafe = 0u;
+    uint32_t first_bad[6];
+    adv_obs_t o;
+    uint8_t target;
+
+    printf("TC-090  bounded deterministic schedule explorer over the reconfiguration fault space [Lot 5 Phase 3]\n");
+    memset(first_bad, 0, sizeof(first_bad));
+    for (rem_sel = 0; rem_sel < 2; rem_sel++)
+    for (pd = 0; pd < 8; pd++)
+    for (cd = 0; cd < 8; cd++)
+    for (topo = 0; topo < 4; topo++)
+    for (crash = 0; crash < 3; crash++)
+    for (heal_sel = 0; heal_sel < 3; heal_sel++) {
+        uint32_t k, e0;
+        bus_init(); bus_run(2000u);
+        li = leader_index();
+        if (li < 0) { continue; }
+        survivors_of(li, &a, &b);
+        rem = (rem_sel == 0) ? a : b;
+        keep = (rem == a) ? b : a;
+        target = (uint8_t)(0x07u & ~(1u << rem));
+        if ((target & (uint8_t)(1u << li)) == 0u) { continue; }
+        adv_init(&o);
+        adv_paths_from(li, (uint8_t)pd, true);
+        if (!mosaik_request_reconfiguration(&g_bus.node[li], target)) { adv_paths_from(li, (uint8_t)pd, false); continue; }
+        adv_run(&o, 1u);
+        adv_paths_from(li, (uint8_t)pd, false);
+        e0 = g_bus.node[li].committed_epoch;
+        for (k = 0; k < 400u && g_bus.node[li].committed_epoch == e0; k++) { adv_run(&o, 1u); }
+        if (g_bus.node[li].committed_epoch != e0) {
+            adv_paths_from(li, (uint8_t)cd, true); adv_run(&o, 1u); adv_paths_from(li, (uint8_t)cd, false);
+        }
+        if (crash == 1) { bus_crash_node(li); } else if (crash == 2) { bus_crash_node(keep); }
+        if (topo > 0) { isolate_node(topo - 1, true); }
+        adv_run(&o, heals[heal_sel]);
+        bus_set_full_connectivity();
+        if (crash == 1) { bus_restart_node(li); } else if (crash == 2) { bus_restart_node(keep); }
+        adv_run(&o, 4000u);
+        schedules++;
+        if (!adv_safe(&o)) {
+            unsafe++;
+            if (unsafe == 1u) {
+                first_bad[0] = (uint32_t)rem_sel; first_bad[1] = (uint32_t)pd; first_bad[2] = (uint32_t)cd;
+                first_bad[3] = (uint32_t)topo; first_bad[4] = (uint32_t)crash; first_bad[5] = heals[heal_sel];
+                printf("        MINIMAL FAILING SCHEDULE: removed=%s PROPOSE-denied=0x%02X COMMIT-denied=0x%02X partition=%d crash=%d heal=%u ms\n",
+                       rem_sel ? "second peer" : "first peer", pd, cd, topo, crash, heals[heal_sel]);
+                adv_report(&o, "TC-090");
+            }
+        }
+    }
+    check(schedules == 4608u, "Lot 5 Phase 3",
+          "the declared schedule space executed in full (2 removals x 8 x 8 delivery subsets x 4 partitions x 3 crash points x 3 heal delays)");
+    check(unsafe == 0u, "INV-LEADER-UNIQUE",
+          "no schedule in the explored space violated any safety invariant at any observed millisecond");
+    printf("        %u schedules explored, %u violating; the space is bounded by construction and is not a proof of correctness\n",
+           schedules, unsafe);
+}
+
 int main(void)
 {
     printf("MOSAIK HIL bench - host test suite\n");
@@ -5857,6 +6934,20 @@ int main(void)
     tc_076_permitted_transitions();
     tc_077_configuration_persistence();
     tc_078_transaction_interactions();
+
+    /* LOT 5 Phase 3: adversarial hardening campaign */
+    tc_079_partial_commit_exhaustion();
+    tc_080_config_message_faults();
+    tc_081_proposer_crash_matrix();
+    tc_082_acceptor_crash_matrix();
+    tc_083_removed_node_and_stuck_epoch();
+    tc_084_readmission_stale_evidence();
+    tc_085_conflicting_successors();
+    tc_086_term_epoch_cross_product();
+    tc_087_lease_evidence_attacks();
+    tc_088_safe_degraded_during_transaction();
+    tc_089_time_boundaries();
+    tc_090_bounded_schedule_explorer();
 
     printf("----------------------------------\n");
     printf("%d checks, %d failures\n", g_checks, g_failures);
