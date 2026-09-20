@@ -225,15 +225,32 @@ Test Result / Evidence
 | TC-089 | REQ-FUNC-0001 | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | lease, retransmission and abandonment timers | PASS (0 overlaps) | IMPLEMENTED-SIM |
 | TC-090 | REQ-FUNC-0001 (adversarial) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | whole reconfiguration path | PASS (4608 schedules) | IMPLEMENTED-SIM |
 | TC-091 | NONE (HIL-derived: HIL-COM-001/002/003) | — | svc_mosaik_proto | `mosaik_set_transport_status`, `mosaik_transport_can_transmit` | PASS | IMPLEMENTED-SIM |
-| TC-092 | NONE (HIL-derived: HIL-COM-004) | — | svc_mosaik_proto | `mosaik_has_valid_leadership_authority` | **RED (2 checks)** | NOT-STARTED |
-| TC-093 | NONE (HIL-derived: HIL-COM-005, HIL-COM-002) | — | svc_mosaik_proto | `emit()` transmit path | **RED (1 check)** | NOT-STARTED |
+| TC-092 | NONE (HIL-derived: HIL-COM-004) | — | svc_mosaik_proto | `mosaik_has_valid_leadership_authority` | PASS since `0667d04` (RED at `f3d6484`, 2 checks) | IMPLEMENTED-SIM |
+| TC-093 | NONE (HIL-derived: HIL-COM-005, HIL-COM-002) | — | svc_mosaik_proto | `emit()` transmit path | PASS since `0667d04` (RED at `f3d6484`, 1 check) | IMPLEMENTED-SIM |
 | TC-094 | NONE (HIL-derived: HIL-COM-006) | — | Cluster_Task / svc_mosaik_proto | lease renewal, `last_ack_rx_ms`, `mosaik_has_quorum_ack_evidence` | PASS | IMPLEMENTED-SIM |
 | TC-095 | NONE (HIL-derived: HIL-COM-007) | — | svc_mosaik_proto | `enter_safe`, NO_QUORUM escalation path | PASS | IMPLEMENTED-SIM |
-| TC-096 | NONE (HIL-derived: HIL-COM-004, HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | lease window, post-recovery evidence | **RED (1 check)** | NOT-STARTED |
-| TC-097 | NONE (HIL-derived: HIL-COM-005) | — | svc_mosaik_proto | `emit()` acknowledgement and vote-grant paths | **RED (1 check)** | NOT-STARTED |
-| TC-098 | NONE (HIL-derived: HIL-COM-004/005/011) | — | Cluster_Task / svc_mosaik_proto | `emit_config()`, joint-quorum commit rule | **RED (2 checks)** | NOT-STARTED |
+| TC-096 | NONE (HIL-derived: HIL-COM-004, HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | lease window, post-recovery evidence | PASS since `0667d04` (RED at `f3d6484`, 1 check) | IMPLEMENTED-SIM |
+| TC-097 | NONE (HIL-derived: HIL-COM-005) | — | svc_mosaik_proto | `emit()` acknowledgement and vote-grant paths | PASS since `0667d04` (RED at `f3d6484`, 1 check) | IMPLEMENTED-SIM |
+| TC-098 | NONE (HIL-derived: HIL-COM-004/005/011) | — | Cluster_Task / svc_mosaik_proto | `emit_config()`, joint-quorum commit rule | PASS since `0667d04` (RED at `f3d6484`, 2 checks) | IMPLEMENTED-SIM |
 | TC-099 | REQ-ICD-001 (related, not source) | REQ-ICD-001 | svc_mosaik_proto | `mosaik_encode`, `mosaik_decode` DLC and identifier rules | PASS | IMPLEMENTED-SIM |
 | TC-100 | REQ-FUNC-0007 / ADD-F007 (related, not source) | REQ-ICD-002 | svc_mosaik_proto + external observer | frame fields available at the transmit boundary | PASS (bound 25 600 ms) | IMPLEMENTED-SIM |
+| TC-101 | NONE (HIL-derived: HIL-COM-004) | — | svc_mosaik_proto | authority predicate vs `mosaik_has_quorum_ack_evidence` | PASS | IMPLEMENTED-SIM |
+| TC-102 | NONE (HIL-derived: HIL-COM-004) | — | svc_mosaik_proto | lease expiry on transport report | PASS | IMPLEMENTED-SIM |
+| TC-103 | NONE (HIL-derived: HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | stale/replay rules across recovery | PASS | IMPLEMENTED-SIM |
+| TC-104 | NONE (HIL-derived: all LOT 6A) | — | Cluster_Task / svc_mosaik_proto | whole transport path | PASS (16 schedules) | IMPLEMENTED-SIM |
+| TC-105 | NONE (HIL-derived: HIL-COM-005) | — | svc_mosaik_proto | vote recording vs `emit()` gate | PASS | IMPLEMENTED-SIM |
+| TC-106 | NONE (HIL-derived: HIL-COM-011) | — | Cluster_Task / svc_mosaik_proto | `emit_config()` gate, joint quorum | PASS (8 points) | IMPLEMENTED-SIM |
+| TC-107 | NONE (HIL-derived: HIL-COM-005, HIL-COM-011) | — | svc_mosaik_proto | `config_persist`, acceptance binding | PASS | IMPLEMENTED-SIM |
+| TC-108 | NONE (HIL-derived: INV-RECONFIG-REMOVED-NODE) | — | Cluster_Task / svc_mosaik_proto | membership gate across transport events | PASS | IMPLEMENTED-SIM |
+| TC-109 | REQ-SAFE-0003 (related) | REQ-SAF-002 | svc_mosaik_proto | SAFE latch, suppressed announcements | PASS | IMPLEMENTED-SIM |
+| TC-110 | NONE (HIL-derived: HIL-COM-002) | — | svc_mosaik_proto | `mosaik_transport_can_transmit` DEGRADED branch | PASS | IMPLEMENTED-SIM |
+| TC-111 | NONE (HIL-derived: HIL-COM-004/005/008) | — | svc_mosaik_proto | RECOVERING branch | PASS | IMPLEMENTED-SIM |
+| TC-112 | NONE (HIL-derived: INV-TRANSPORT-LOCAL-EVIDENCE) | — | Cluster_Task / svc_mosaik_proto | locality of the transport report | PASS | IMPLEMENTED-SIM |
+| TC-113 | REQ-FUNC-0001 (related) | REQ-FUN-001 | Cluster_Task / svc_mosaik_proto | vote memory, term monotonicity | PASS (10 offsets) | IMPLEMENTED-SIM |
+| TC-114 | NONE (HIL-derived: HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | stale frame release after recovery | PASS | IMPLEMENTED-SIM |
+| TC-115 | NONE (HIL-derived: determinism) | — | whole transport path | 6000-byte state trace | PASS | IMPLEMENTED-SIM |
+| TC-116 | NONE (HIL-derived: HIL-COM-008) | — | Cluster_Task / svc_mosaik_proto | lease expiry survives recovery; election required | PASS | IMPLEMENTED-SIM |
+| TC-117 | NONE (HIL-derived: all LOT 6A) | — | Cluster_Task / svc_mosaik_proto | whole transport path | PASS (1152 schedules) | IMPLEMENTED-SIM |
 
 ---
 
@@ -846,7 +863,7 @@ related — REQ-IF-0001, REQ-ICD-001, REQ-ICD-002, REQ-PERF-0004, REQ-FUNC-0007 
 it is named as *related*, never as the source, and its ADD status is unchanged.
 ADD-F004 and ADD-F007 both remain OPEN.
 
-### 10.2 RED baseline
+### 10.2 RED baseline and its correction
 
 | Test | Property | Checks | Result |
 |------|----------|--------|--------|
@@ -863,14 +880,42 @@ ADD-F004 and ADD-F007 both remain OPEN.
 | | **Total** | **50** | **7 failing checks** |
 
 The seven failures are the LOT 6A counterexamples. Their single root cause is
-that the transport interface introduced at the RED baseline is **inert**: the
-status is recorded and no protocol decision reads it, so a mute node keeps
-emitting frames and keeps valid authority for the remainder of its 500 ms
-lease. Implementing the reaction specified in `PROTOCOL.md` §11.2 is LOT 6A
-GREEN and is deliberately not part of the RED commit.
+that the transport interface introduced at the RED baseline was **inert**: the
+status was recorded and no protocol decision read it, so a mute node kept
+emitting frames and kept valid authority for the remainder of its 500 ms
+lease. All seven pass since the minimal GREEN `0667d04`, twelve lines of logic
+in `firmware/core/mosaik_node.c` with no test altered.
 
 TC-001 to TC-090 are **unchanged**, and their output is byte-identical to
-commit `9ccd28e`.
+commit `9ccd28e`. The GREEN firmware built against the unmodified
+TC-001–TC-090 suite reproduces `ea33d67` byte for byte.
+
+### 10.2a Adversarial campaign (TC-101 to TC-117, `2c13556`)
+
+Seventeen tests, **77 checks**, firmware untouched: no implementation change
+was made to satisfy any of them. Per-test checks: 4, 4, 4, 2, 5, 3, 7, 8, 6,
+6, 5, 5, 2, 4, 1, 9, 2.
+
+| Category | Tests |
+|---|---|
+| Evidence versus muteness | TC-101, TC-102 |
+| Recovery and stale traffic | TC-103, TC-114, **TC-116** |
+| Flapping and boundaries | TC-104, TC-113 |
+| Transmit refusal on every path | TC-105, TC-107, TC-109, TC-111 |
+| Membership interaction | TC-106, TC-107, TC-108 |
+| State semantics | TC-110 (DEGRADED), TC-111 (RECOVERING), TC-109 (SAFE) |
+| No-magic boundary | TC-112 |
+| Determinism | TC-115 |
+| Bounded exploration, 1152 schedules | TC-117 |
+
+**No genuine counterexample against the implementation was found.** One
+erratum in the adversarial oracle itself was found, characterised and
+preserved: a mute-lease check first written as "`lease_expiry_ms` must not
+increase" fired on an already-expired lease being re-stamped to the current
+instant, with the node a FOLLOWER holding no authority and no live lease. The
+check was replaced by the stronger and correct predicate — a mute node never
+holds a live lease — and the implementation was not touched
+(`LOT6A_TRANSPORT_REPORT.md` §13.3).
 
 ### 10.3 Invariant coverage
 
@@ -884,6 +929,11 @@ commit `9ccd28e`.
 | INV-TRANSPORT-RECOVERY-NO-AUTHORITY | HIL-derived | TC-096 |
 | INV-ICD-FRAME-GEOMETRY | HIL-derived | TC-099 |
 | INV-CHRONOLOGY-SUFFICIENT | HIL-derived | TC-100 |
+| INV-TRANSPORT-NO-MUTE-AUTHORITY (adversarial) | HIL-derived | TC-101, TC-102, TC-111, TC-117 |
+| INV-TRANSPORT-NO-TX (adversarial) | HIL-derived | TC-105, TC-107, TC-109, TC-111, TC-117 |
+| INV-TRANSPORT-RECOVERY-NO-AUTHORITY (adversarial) | HIL-derived | TC-103, TC-111, TC-114, TC-116, TC-117 |
+| INV-TRANSPORT-NOT-FDIR (adversarial) | HIL-derived | TC-109, TC-110, TC-112 |
+| INV-TRANSPORT-LOCAL-EVIDENCE (adversarial) | HIL-derived | TC-112, TC-117 |
 | INV-FDIR-NO-MAGIC | inherited | TC-091, TC-097 |
 | INV-LEADER-UNIQUE | inherited, REQ-FUNC-0001 | TC-092, TC-096 |
 | INV-TERM-MONOTONIC | inherited | TC-096 |

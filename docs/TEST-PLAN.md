@@ -121,15 +121,32 @@ the traces are committed under `results/`.
 | TC-098 | Transport fault during a membership transaction: no mute authority, no mute CONFIG traffic, joint quorum intact | HIL-COM-004/005/011 | **RED — 2 failing checks** |
 | TC-099 | CAN-FD transport does not widen the logical frame; FD payload lengths rejected | HIL-COM-009, INV-ICD-FRAME-GEOMETRY | pass (5 checks) |
 | TC-100 | Chronology reconstruction without a correlation_id, and its measured boundary | HIL-COM-010, INV-CHRONOLOGY-SUFFICIENT | pass (4 checks) |
+| TC-101 | Local muteness beats acknowledgements that really do form fresh quorum evidence | HIL-COM-004, INV-TRANSPORT-NO-MUTE-AUTHORITY | pass (4 checks) |
+| TC-102 | Bus-off at maximum remaining lease (499 ms unspent) | HIL-COM-004 | pass (4 checks) |
+| TC-103 | BUS_OFF to RECOVERING to UP with delayed pre-fault frames replayed | HIL-COM-008, INV-NO-STALE-RECOVERY | pass (4 checks) |
+| TC-104 | Flapping across heartbeat and election boundaries, 16 schedules | all LOT 6A invariants, continuous oracle | pass (2 checks) |
+| TC-105 | Follower muted exactly as it would grant a vote | HIL-COM-005, INV-ONE-VOTE-PER-TERM | pass (5 checks) |
+| TC-106 | Leader muted at eight membership-transaction stages | HIL-COM-011, INV-RECONFIG-QUORUM | pass (3 checks) |
+| TC-107 | Acceptor muted between binding and transmission | HIL-COM-005/011, INV-RECONFIG-CONSISTENT | pass (7 checks) |
+| TC-108 | Removed node loses and regains transport | INV-RECONFIG-REMOVED-NODE | pass (8 checks) |
+| TC-109 | SAFE node loses and regains transport | HIL-COM-005, INV-SAFE-LATCH | pass (6 checks) |
+| TC-110 | DEGRADED transport is a fault indication, not muteness | HIL-COM-002, INV-TRANSPORT-NOT-FDIR | pass (6 checks) |
+| TC-111 | RECOVERING is still off the bus | HIL-COM-004/005/008 | pass (5 checks) |
+| TC-112 | Transport fault combined with a network partition | INV-TRANSPORT-LOCAL-EVIDENCE | pass (5 checks) |
+| TC-113 | Transport fault across election collisions, 10 offsets | INV-ONE-VOTE-PER-TERM, INV-TERM-MONOTONIC | pass (2 checks) |
+| TC-114 | Pre-fault frames released after recovery | HIL-COM-008, INV-LEADER-UNIQUE | pass (4 checks) |
+| TC-115 | Deterministic reproducibility over a 6000-byte state trace | LOT 6A determinism | pass (1 check) |
+| TC-116 | **Critical case:** transport returns before a replacement is elected | HIL-COM-008, INV-TRANSPORT-RECOVERY-NO-AUTHORITY | pass (9 checks) |
+| TC-117 | Bounded deterministic exploration, 1152 schedules | all LOT 6A invariants, continuous oracle | pass (2 checks, 0 violating schedules) |
 
-Previous total at commit `9ccd28e`: 90 tests, 761 checks, 0 failures,
-sanitizer clean.
+Previous total at commit `9ccd28e`: 90 tests, 761 checks, 0 failures.
+LOT 6A RED baseline `f3d6484`: 100 tests, 811 checks, **7 failures** in
+exactly TC-092 (2), TC-093 (1), TC-096 (1), TC-097 (1), TC-098 (2).
+LOT 6A minimal GREEN `0667d04`: 100 tests, 811 checks, 0 failures.
 
-**Current total at the LOT 6A RED baseline: 100 tests, 811 checks, 7 failures,
-sanitizer clean.** The seven failures are intentional and are the LOT 6A
-counterexamples: TC-092 (2), TC-093 (1), TC-096 (1), TC-097 (1), TC-098 (2).
-TC-001 to TC-090 are unchanged and their output is byte-identical to
-`9ccd28e`. RED-before-fix evidence is preserved in history:
+**Current total at commit `2c13556`: 117 tests, 888 checks, 0 failures,
+sanitizer clean.** TC-001 to TC-090 and TC-091 to TC-100 are unchanged and
+their output is byte-identical to `0667d04`. RED-before-fix evidence is preserved in history:
 TC-031 was added RED at `d38985d` (6 failing checks) and passes since
 `f4e0f3c` (LOT 2D); TC-035–TC-050 were added at `af5da87` with 13 failing
 checks in exactly TC-039, TC-040, TC-045, TC-047, TC-048 and TC-050; TC-050
@@ -165,11 +182,26 @@ the physical consequence that its frames do not reach the bus and bus frames
 do not reach it. No node is told anything about any peer, and the emitted-frame
 counters are observation only, read by tests and never by a node.
 
-TC-092, TC-093, TC-096, TC-097 and TC-098 are RED by design: the transport
-interface added at the RED baseline is inert — the status is recorded and no
-protocol decision reads it. Implementing the reaction specified in
-`PROTOCOL.md` §11.2 is LOT 6A GREEN and is deliberately not part of the RED
-commit.
+TC-092, TC-093, TC-096, TC-097 and TC-098 were RED by design at `f3d6484`:
+the transport interface was inert — the status was recorded and no protocol
+decision read it. They pass since the minimal GREEN `0667d04`, which added
+twelve lines of logic to `firmware/core/mosaik_node.c` and changed no test.
+
+**LOT 6A adversarial phase (TC-101 to TC-117).** The implementation is
+attacked, not merely exercised. Two fault shapes are used and the difference
+is the point: either the controller is off the bus entirely, or the node
+reports itself unable to transmit **while the harness keeps delivering frames
+to it**. The second is physically real — a dead transmitter or a broken TX
+line whose receiver still works — and it is what shows the protocol carries
+the invariant rather than the harness carrying it. TC-101 hands a mute leader
+two acknowledgements that genuinely satisfy `mosaik_has_quorum_ack_evidence()`
+and the authority is still refused. Transmit refusal is measured at the true
+callback boundary, so "the core never called tx" is distinguished from "the
+core called tx and the frame was dropped"; the measured result is zero calls.
+TC-117 explores 1152 bounded schedules under a per-millisecond oracle with
+zero violations — bounded exploration, not a proof and not model checking.
+No counterexample against the implementation was found. See
+`LOT6A_TRANSPORT_REPORT.md`.
 
 TC-100 reports a measured limitation rather than asserting its absence: the
 heartbeat sequence is one byte, so (source, term, sequence) repeats after
@@ -178,8 +210,8 @@ term. The external observer's timestamp is therefore **required**, and with it
 no `correlation_id` is needed (`docs/ICD-HIL.md` §6).
 
 Run with `make test`. The suite returns a non-zero exit code on any failure and
-is executed on every push by the CI workflow. **At the LOT 6A RED baseline the
-suite exits non-zero by design.**
+is executed on every push by the CI workflow. It exits zero at `2c13556`; it
+exited non-zero at the RED baseline `f3d6484`, by design.
 
 ## 3. Level 2 measurement method
 
@@ -250,10 +282,13 @@ reported, not discarded.
   PROTO_ERROR is reserved and never raised. TC-042 isolation durations are
   deterministic host observations, not timing bounds.**
 - **Lot 6A is pre-hardware. The transport status, the bus-off contract and the
-  ICD are specified and host-tested as software behaviour only. Hardware
-  bus-off detection and recovery timing, bitrates, transceiver behaviour,
-  electrical integrity, arbitration timing, bus load, clock drift and
-  hardware error-frame behaviour have NO evidence and are LOT 6B. The
-  protocol reaction to a transport fault is NOT implemented at the RED
-  baseline.**
+  ICD are specified, implemented and host-tested as software behaviour only.
+  Hardware bus-off detection and recovery timing, bitrates, transceiver
+  behaviour, electrical integrity, arbitration timing, bus load, clock drift
+  and hardware error-frame behaviour have NO evidence and are LOT 6B. The
+  protocol also trusts the transport status it is told: a platform that
+  reports UP while its controller is bus-off defeats every Lot 6A guarantee,
+  and validating that reporting is LOT 6B. SAFE announcements a node owed
+  while mute are lost, so a peer's DEGRADED evidence can expire during a
+  transport outage.**
 - **HOST SOFTWARE DEMONSTRATOR ONLY — NO HARDWARE VALIDATION. No TRL 4 claim.**

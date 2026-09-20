@@ -16,8 +16,8 @@ distributed fault-tolerant avionics architecture for LEO constellations
 ## Status
 
 **Level 1 — logic verification on host: complete.** The protocol core builds
-with `-Wall -Wextra -Werror` and passes 761 checks across 90 test cases, run by
-CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
+with `-Wall -Wextra -Werror` and passes 888 checks across 117 test cases, run
+by CI on every push. Lot 2A adds a 500 ms leadership lease to prevent an isolated
 leader from retaining authority indefinitely during a 2+1 network partition.
 Lot 2B adds stale/replay message immunity using semantic rejection based on
 term monotonicity, lease validity, and sender state. Lot 2C adds a directional
@@ -36,6 +36,13 @@ Lot 5 replaces the fixed membership with an explicit committed membership mask
 carrying its own configuration epoch, changed only by a PROPOSE/ACCEPT/COMMIT
 transaction that requires a quorum of the old and of the new configuration (see
 `LOT5_RECONFIGURATION_REPORT.md`).
+
+Lot 6A gives the protocol core a local transport status, so a node can
+distinguish "I hear nothing" (a partition) from "I myself cannot speak" (a
+bus-off transmitter). A node that knows it is mute holds no leadership
+authority and hands no frame to its transmitter, and transport recovery
+restores neither (see `LOT6A_TRANSPORT_REPORT.md`). This is the
+**software-facing** contract only: no bus exists.
 
 **Level 2 — timing measurement on hardware: not started.** Hardware not yet
 procured. No measured latency is reported anywhere in this repository.
@@ -105,6 +112,18 @@ sections 2, 4, 6 and 11.
   metadata and out-of-range state bytes have no protocol effect — verified
   by TC-051 through TC-060, captured RED at commit `58a1b5d` before the
   correction `ae9e408`.**
+- **Local transport safety semantics (Lot 6A): a node that locally knows its
+  own controller cannot transmit holds no valid leadership authority and
+  offers no frame to its transmit callback — zero calls, measured at the
+  callback boundary — on the heartbeat, acknowledgement, vote, SAFE and
+  configuration paths alike; the revocation outlives the fault, so transport
+  recovery restores no authority without evidence received afterwards; a
+  bus-off is not FDIR and never latches SAFE by itself, while an
+  error-passive (DEGRADED) controller keeps transmitting — captured RED at
+  commit `f3d6484` with seven failing checks, corrected in twelve lines at
+  `0667d04`, then attacked by TC-101 through TC-117 and 1152 bounded
+  schedules at `2c13556` with no counterexample found
+  (see `LOT6A_TRANSPORT_REPORT.md`).**
 - **Autonomous reconfiguration (Lot 5): membership is an explicit committed
   voter mask with its own configuration epoch, changed only by a distributed
   transaction whose commit requires a quorum of the old and of the new
@@ -132,7 +151,11 @@ sections 2, 4, 6 and 11.
   radiation-tolerant MCU and a separate qualification campaign.
 - **Physical CAN-FD timing validation. The leadership lease and stale/replay
   immunity are host-model parameters only. No hardware network partition
-  testing.**
+  testing. Lot 6A specifies and tests the software-facing transport contract
+  only: real bus-off detection and recovery, their timing, bitrates,
+  transceiver behaviour, termination and arbitration are LOT 6B and have no
+  evidence. The protocol also trusts the transport status it is told; a
+  platform that misreports it defeats those guarantees.**
 - **Cryptographic anti-replay or sequence-number protection. The current
   8-byte frame format has no room for correlation_id. Lot 2B uses semantic
   rejection only. LOT 6 will handle final wire-format decisions.**

@@ -1,7 +1,7 @@
 # MOSAIK HIL Bench — Wire Protocol
 
 **Document:** MOSAIK-HIL-PROTO-001
-**Issue:** 0.8 — 20 September 2026
+**Issue:** 0.9 — 20 September 2026
 **Author:** Sami Bey
 **Parent:** MOSAIK-ADD-0001 (architectural design document, TRL 3)
 
@@ -372,12 +372,14 @@ LOT 6B.
 | **Lot 4: election does not degrade, SAFE term not adopted, state metadata non-authoritative** | **5, 7** | **TC-051 to TC-060** |
 | **Lot 5: membership and quorum reconfiguration** | **4, 5, 10** | **TC-061 to TC-090** |
 | **Lot 6A: transport contract, ICD geometry, chronology** (HIL-derived, no ADD identifier) | **3, 5, 11** | **TC-091 to TC-100** |
+| **Lot 6A adversarial: transport safety under attack** (HIL-derived) | **11** | **TC-101 to TC-117** |
 
 The remaining requirements of MOSAIK-ADD-0001 are out of scope for this bench.
 
-The Lot 6A row is **HIL-derived**: `requirements/HIL-COMMS-REQUIREMENTS.md`
+The Lot 6A rows are **HIL-derived**: `requirements/HIL-COMMS-REQUIREMENTS.md`
 carries no ADD requirement identifier, and none was invented. TC-092, TC-093,
-TC-096, TC-097 and TC-098 are RED at the LOT 6A RED baseline.
+TC-096, TC-097 and TC-098 were RED at `f3d6484` and pass since `0667d04`; the
+adversarial campaign TC-101 to TC-117 is green at `2c13556`.
 
 ---
 
@@ -514,11 +516,15 @@ a safety-invariant violation in the executed scenarios. See
 
 ## 11. Transport status and the bus-off contract (Lot 6A)
 
-**PRE-HARDWARE SPECIFICATION. The reaction specified in 11.2 is NOT
-implemented at the LOT 6A RED baseline.** The interface exists and is inert:
-the status is recorded and no protocol decision reads it. TC-092, TC-093,
-TC-096, TC-097 and TC-098 fail for exactly that reason, by design. The
-complete interface is specified in `docs/ICD-HIL.md` §3.
+**PRE-HARDWARE. The reaction specified in 11.2 is IMPLEMENTED (`0667d04`)
+and adversarially validated (`2c13556`); the hardware behind it is not.**
+Detection and recovery, and their timing, remain LOT 6B with no evidence.
+The complete interface is specified in `docs/ICD-HIL.md` §3, and the
+implementation and its validation in `LOT6A_TRANSPORT_REPORT.md`.
+
+*(Issue 0.8 introduced this section as a specification with an inert
+interface; the RED baseline `f3d6484` failed seven checks against it, by
+design. Issue 0.9 records that the reaction is now implemented.)*
 
 ### 11.1 What the status is
 
@@ -551,7 +557,7 @@ protocol core, which only reacts to what it is told. Detection and recovery
 **timing** are not specified here and are not validated, because no hardware
 exists.
 
-### 11.2 The reaction — specified, NOT yet implemented
+### 11.2 The reaction — implemented
 
 1. **No authority while mute.** A node whose own transport cannot transmit
    holds no valid leadership authority, from the instant it knows. The lease
@@ -570,7 +576,23 @@ exists.
 4. **Recovery restores nothing.** Authority may return only on evidence
    actually received *after* recovery.
 5. **DEGRADED is not muteness.** An error-passive controller still transmits.
-   Silencing it would convert a recoverable fault into an outage (TC-093).
+   Silencing it would convert a recoverable fault into an outage (TC-093,
+   TC-110).
+
+**How it is implemented.** One rule with two conjuncts: valid leadership
+authority requires an unexpired lease **and** a locally transmit-capable
+transport. `mosaik_has_valid_leadership_authority()` carries the second
+conjunct, and `mosaik_set_transport_status()` additionally expires the lease
+when the reported status is not transmit-capable. Both are needed: the guard
+alone would let authority spring back when an outage shorter than the lease
+ended (TC-096), and the expiry alone would not stop a receive-capable but
+transmit-dead node from being handed qualifying acknowledgements (TC-101).
+Step-down then happens through the lease-expiry path that `mosaik_tick()`
+already runs, so there is **one** mechanism for losing leadership, the term is
+untouched and no election is invented. Transmission is gated centrally in
+`emit()` and `emit_config()`, which between them carry all nine frame kinds;
+`last_tx_ms` is not advanced when nothing was sent, so a recovered node
+resumes with one current frame rather than replaying what it suppressed.
 
 ### 11.3 Bus-off does not latch SAFE
 
@@ -596,4 +618,23 @@ pins the decision, so that Lot 6A GREEN cannot quietly map BUS_OFF to SAFE.
 
 Hardware detection of bus-off, its latency, the recovery mechanism, recovery
 latency, and whether recovery is automatic or commanded. All four are
-LOT 6B and have **no evidence**.
+LOT 6B and have **no evidence**. The protocol also **trusts** the reported
+status: a platform that reports UP while its controller is bus-off defeats
+every invariant of this section, and validating the platform's own reporting
+is LOT 6B.
+
+### 11.5 SAFE while mute
+
+A node already in SAFE owes periodic SAFE announcements (section 7) and a
+mute controller cannot send them. The protocol **intent** to announce is
+separated from the **ability** to submit: the node stays logically SAFE and
+the gate of 11.2 suppresses the submissions. When the transport returns, the
+ordinary periodic mechanism resumes with one announcement and the frames
+suppressed during the outage are **not** replayed (TC-109).
+
+**Limitation.** Those announcements are lost. A peer whose DEGRADED evidence
+window (three heartbeat periods) expires during the outage returns to NOMINAL
+and re-enters DEGRADED only when announcements resume. This is correct —
+evidence must come from frames actually received — but it means a transport
+outage on a SAFE node is visible to peers as a temporary loss of that node's
+SAFE evidence.

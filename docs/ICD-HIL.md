@@ -1,7 +1,7 @@
 # MOSAÏK HIL Bench — Interface Control Document
 
 **Document:** MOSAIK-HIL-ICD-001
-**Issue:** 1.0 — 20 September 2026
+**Issue:** 1.1 — 20 September 2026
 **Lot:** LOT 6A (pre-hardware)
 **Status:** SPECIFICATION. No physical layer has been built, connected or measured.
 
@@ -147,7 +147,7 @@ error-confinement states, which are defined by the CAN standard itself:
 | `MOSAIK_TRANSPORT_UP` | error-active | yes | Normal. |
 | `MOSAIK_TRANSPORT_DEGRADED` | error-passive | **yes** | A persistent fault is indicated, but the controller still transmits. **This is not muteness.** |
 | `MOSAIK_TRANSPORT_BUS_OFF` | bus-off | **no** | The controller has removed itself from the bus. **Local knowledge of own muteness.** |
-| `MOSAIK_TRANSPORT_RECOVERING` | bus-off recovery in progress | **no** | Still off the bus. |
+| `MOSAIK_TRANSPORT_RECOVERING` | bus-off recovery in progress | **no** | Still off the bus. Recovery is a sequence, not a completion; a node must not assume it can communicate because recovery has started. Validated by TC-111. |
 
 **Locality rule (INV-TRANSPORT-LOCAL-EVIDENCE).** The status describes *this
 node's own controller only*. It carries nothing about any peer, about
@@ -166,8 +166,9 @@ LOT 6A deliberately separates three things that are easy to conflate:
 
 1. **Transport detection** — the platform's job. Out of scope for LOT 6A;
    measured in LOT 6B.
-2. **Protocol reaction** — specified here and in `PROTOCOL.md` §11. This is
-   what LOT 6A GREEN will implement.
+2. **Protocol reaction** — specified here and in `PROTOCOL.md` §11.2, and
+   **implemented at `0667d04`**, adversarially validated at `2c13556`
+   (`LOT6A_TRANSPORT_REPORT.md`).
 3. **Recovery policy** — when and how the transport is brought back. The
    protocol core does not command recovery; it reacts to the status reported.
 
@@ -199,6 +200,13 @@ through the existing NO_QUORUM path. TC-095 pins this decision.
 See `requirements/HIL-COMMS-REQUIREMENTS.md` for the requirement text and
 `verification/TRACEABILITY.md` for the test mapping. These are **HIL-derived
 requirements**; they carry no ADD requirement identifier and none is invented.
+
+All eleven host-verifiable requirements HIL-COM-001 to HIL-COM-011 are
+**satisfied** at `2c13556`. The transmit-refusal contract is measured at the
+true callback boundary: the harness counts every call into the transmit
+callback before any filtering, so "the core never called tx" is distinguished
+from "the core called tx and the frame was dropped". The measured result is
+**zero calls** while a node reports itself unable to transmit.
 
 ---
 
@@ -345,6 +353,7 @@ host bus, where the frozen LOT 2–LOT 5 evidence was produced.
 
 ## 9. Status
 
-**LOT 6 is NOT closed. LOT 6A is IN PROGRESS — PRE-HARDWARE.**
+**LOT 6 is NOT closed. LOT 6A is GREEN — PRE-HARDWARE. LOT 6B is NOT
+STARTED.**
 No physical CAN-FD validation. No measured timing. No CbT evidence. No TRL
-increase.
+increase. The LOT 6B handoff checklist is in `LOT6A_TRANSPORT_REPORT.md` §15.

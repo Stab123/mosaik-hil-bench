@@ -73,6 +73,7 @@
 | **Lease** | 500 ms nominal, renewed only on acknowledgements actually received from a quorum of peers in the current term (Lot 2C, host model); outbound heartbeat delivery alone never renews |
 | **Quorum** | Majority of cluster (4 of 6 for full; 2 of 3 for bench subset) |
 | **Split-brain** | Two nodes claiming leadership in same term → immediate SAFE |
+| **Transport (host, Lot 6A)** | A node's own controller state — UP, DEGRADED (error-passive, still transmits), BUS_OFF, RECOVERING. Local evidence about that node only. BUS_OFF and RECOVERING revoke leadership authority and suppress transmission; neither latches SAFE. Software-facing contract only; hardware detection and recovery timing are LOT 6B (`PROTOCOL.md` §11) |
 | **SAFE (host)** | Latched for the lifetime of one powered node instance; follower role, no authority, no participation, SAFE announcements only; cold restart clears it (no persistence); no PGA (Lot 3) |
 | **DEGRADED (host)** | Cluster-awareness state held while a peer's SAFE frame actually received is fresh (3 heartbeat periods); does not revoke authority (Lot 3, ADD-F011) |
 

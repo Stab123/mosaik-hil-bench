@@ -1,7 +1,7 @@
 # MOSAÏK HIL Bench — Communication Substrate Requirements (LOT 6A)
 
 **Document:** MOSAIK-HIL-COMMS-001
-**Issue:** 1.0 — 20 September 2026
+**Issue:** 1.1 — 20 September 2026
 **Lot:** LOT 6A (pre-hardware)
 **Interface:** `docs/ICD-HIL.md`
 
@@ -48,19 +48,29 @@ hardware are listed separately in §3 as LOT 6B obligations with no evidence.
 | **HIL-COM-001** | The protocol core shall accept a transport status reported by its platform describing **only that node's own** controller. | INV-TRANSPORT-LOCAL-EVIDENCE | TC-091 | **PASS** |
 | **HIL-COM-002** | The transport status shall distinguish an able-to-transmit fault indication (error-passive) from muteness (bus-off, recovering). | INV-TRANSPORT-LOCAL-EVIDENCE | TC-091, TC-093 | **PASS** |
 | **HIL-COM-003** | Reporting a transport status to one node shall change no protocol field of any other node. | INV-TRANSPORT-LOCAL-EVIDENCE | TC-091, TC-097 | **PASS** |
-| **HIL-COM-004** | A node whose own transport cannot transmit shall not hold valid leadership authority. | INV-TRANSPORT-NO-MUTE-AUTHORITY | TC-092, TC-096, TC-098 | **RED — NOT IMPLEMENTED** |
-| **HIL-COM-005** | A node whose own transport cannot transmit shall hand no frame to the transmit interface, on any path, including the configuration path. | INV-TRANSPORT-NO-TX | TC-093, TC-097, TC-098 | **RED — NOT IMPLEMENTED** |
+| **HIL-COM-004** | A node whose own transport cannot transmit shall not hold valid leadership authority. | INV-TRANSPORT-NO-MUTE-AUTHORITY | TC-092, TC-096, TC-098, TC-101, TC-102, TC-111 | **PASS** since `0667d04` |
+| **HIL-COM-005** | A node whose own transport cannot transmit shall hand no frame to the transmit interface, on any path, including the configuration path. | INV-TRANSPORT-NO-TX | TC-093, TC-097, TC-098, TC-105, TC-107, TC-109, TC-111 | **PASS** since `0667d04`, measured at the true callback boundary |
 | **HIL-COM-006** | A transport fault shall create no lease renewal, acknowledgement evidence or quorum contact. | INV-TRANSPORT-NO-FABRICATED-EVIDENCE | TC-094 | **PASS** |
 | **HIL-COM-007** | A transport fault shall not by itself latch SAFE. A persistently mute node shall still escalate through the existing NO_QUORUM path and with that cause. | INV-TRANSPORT-NOT-FDIR | TC-095 | **PASS** |
-| **HIL-COM-008** | After transport recovery, authority shall be re-established only from evidence actually received after recovery. | INV-TRANSPORT-RECOVERY-NO-AUTHORITY | TC-096 | **PASS** (the outage half of TC-096 is RED) |
+| **HIL-COM-008** | After transport recovery, authority shall be re-established only from evidence actually received after recovery. | INV-TRANSPORT-RECOVERY-NO-AUTHORITY | TC-096, TC-103, TC-111, TC-114, **TC-116** | **PASS** |
 | **HIL-COM-009** | The logical frame shall remain an 11-bit identifier with DLC 8 regardless of the physical transport, and payload lengths above 8 bytes shall be rejected. | INV-ICD-FRAME-GEOMETRY | TC-099 | **PASS** |
 | **HIL-COM-010** | The chronology of authority-bearing events shall be reconstructible from the external observer's timestamp and the fields already on the wire, without a `correlation_id`. | INV-CHRONOLOGY-SUFFICIENT | TC-100 | **PASS**, bounded by the measured 25 600 ms sequence-wrap (`docs/ICD-HIL.md` §6) |
-| **HIL-COM-011** | A transport fault during a membership transaction shall not cause a commit on evidence that could not have been received, nor an inconsistent configuration. | INV-RECONFIG-QUORUM, INV-RECONFIG-CONSISTENT | TC-098 | **PASS** (the authority and transmit halves of TC-098 are RED) |
+| **HIL-COM-011** | A transport fault during a membership transaction shall not cause a commit on evidence that could not have been received, nor an inconsistent configuration. | INV-RECONFIG-QUORUM, INV-RECONFIG-CONSISTENT | TC-098, TC-106, TC-107, TC-108 | **PASS** |
 
-**Four of these are RED at the LOT 6A RED baseline** (HIL-COM-004 and
-HIL-COM-005, across TC-092, TC-093, TC-096, TC-097 and TC-098). The transport
-interface is specified and inert: the status is recorded and no protocol
-decision reads it. Implementing the reaction is **LOT 6A GREEN**.
+**HIL-COM-004 and HIL-COM-005 were RED at the RED baseline `f3d6484`**
+(TC-092, TC-093, TC-096, TC-097, TC-098 — seven failing checks), because the
+transport interface was specified and inert. They **pass since `0667d04`**,
+and all eleven requirements are satisfied at `2c13556` after the adversarial
+campaign TC-101 to TC-117, including 1152 bounded exploration schedules with
+zero violations. See `LOT6A_TRANSPORT_REPORT.md`.
+
+**Adversarially confirmed properties not separately numbered above:** DEGRADED
+remains transmit-capable and is never treated as peer SAFE evidence (TC-110);
+RECOVERING is non-transmitting and reaching UP through it restores nothing
+(TC-111); transport recovery does not restore voting membership (TC-108);
+SAFE stays latched across an outage and announcements resume rather than
+replay (TC-109); the critical recovery case, where the transport returns
+before a replacement is elected, restores no authority (TC-116).
 
 ---
 
@@ -87,5 +97,6 @@ status is unchanged by this document; ADD-F004 and ADD-F007 remain open.
 
 ## 4. Status
 
-**LOT 6 is NOT closed. LOT 6A is IN PROGRESS — PRE-HARDWARE.**
+**LOT 6 is NOT closed. LOT 6A is GREEN — PRE-HARDWARE. LOT 6B is NOT
+STARTED and has no evidence.**
 No physical CAN-FD validation. No measured timing. No CbT evidence.
