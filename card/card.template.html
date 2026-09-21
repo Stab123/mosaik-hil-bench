@@ -141,10 +141,14 @@
     height: 30mm;
     padding: 1.5mm;
     background: var(--papier);
-    border-radius: 1mm;
   }
 
-  .qr svg { width: 100%; height: 100%; display: block; }
+  .qr img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    image-rendering: pixelated;
+  }
 
   /* Verso : encre sombre sur papier blanc, pour qui prefere un QR au dos. */
   .carte.verso {
@@ -170,8 +174,6 @@
     padding: 0;
     margin-right: 5mm;
   }
-
-  .verso .qr svg path { fill: var(--encre); }
 
   .invite {
     font-size: 4.4pt;
@@ -227,14 +229,14 @@
           <span class="affiliation">SSIP · Lucerne</span>
         </div>
       </div>
-      <div class="qr"><!--QR_SVG--></div>
+      <div class="qr"><!--QR_IMG--></div>
     </div>
   </div>
 
   <p class="legende">Verso — QR agrandi, encre sombre sur papier</p>
   <div class="apercu">
     <div class="carte verso">
-      <div class="qr"><!--QR_SVG--></div>
+      <div class="qr"><!--QR_IMG--></div>
       <div class="bloc-verso">
         <div class="marque">MOSAÏK</div>
         <div class="accroche">Sami Bey · Fondateur</div>

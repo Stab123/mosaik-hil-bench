@@ -20,7 +20,7 @@ const path = require('path');
   }
 
   const source = path.resolve(__dirname, 'card.html');
-  const target = path.resolve(__dirname, process.argv[2] || 'carte-85x55.pdf');
+  const target = path.resolve(__dirname, process.argv[2] || 'carte-mosaik-recto-verso.pdf');
 
   const browser = await chromium.launch();
   const page = await browser.newPage();

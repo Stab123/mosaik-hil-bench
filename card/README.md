@@ -12,19 +12,19 @@ générée et vérifiée localement.
 | `verify.py` | Décode le QR produit et compare les octets à `vcard.vcf`. |
 | `check_pdf.py` | Décode chaque page du PDF et mesure la taille de module réelle. |
 | `export-pdf.js` | Exporte `card.html` en PDF de deux pages 85 × 55 mm. |
-| `card.template.html` | Maquette recto/verso. `<!--QR_SVG-->` reçoit le symbole. |
-| `card.html` | Carte générée, QR inclus en SVG inline. Aucune ressource externe. |
-| `qr-vcard.svg` | QR vectoriel, à remettre à l'imprimeur. |
+| `card.template.html` | Maquette recto/verso. `<!--QR_IMG-->` reçoit le symbole. |
+| `card.html` | Carte générée, QR embarqué en PNG. Aucune ressource externe. |
+| `qr-vcard.svg` | QR vectoriel, à remettre à l'imprimeur s'il le demande. |
 | `qr-vcard.png` | QR matriciel 1944 × 1944 px. |
-| `carte-85x55.pdf` | PDF d'impression, deux pages sans marge. |
+| `carte-mosaik-recto-verso.pdf` | PDF d'impression, deux pages sans marge. |
 
 ## Utilisation
 
 ```sh
 pip install -r requirements.txt
 python3 generate.py                      # qr-vcard.svg, qr-vcard.png, card.html
-node export-pdf.js                       # carte-85x55.pdf
-python3 verify.py --pdf carte-85x55.pdf  # décode le PNG et les deux pages du PDF
+node export-pdf.js                       # carte-mosaik-recto-verso.pdf
+python3 verify.py --pdf carte-mosaik-recto-verso.pdf
 ```
 
 Ouvrir `card.html` dans un navigateur pour l'aperçu. Le PDF sort en deux pages
@@ -45,8 +45,9 @@ python3 generate.py --ecc Q     # correction d'erreur supérieure
 
 Coller une vCard dans un générateur web transmet un numéro de téléphone, une
 adresse électronique et une adresse postale à un tiers, à chaque rendu si le QR
-est chargé depuis une URL d'API. `card.html` embarque le symbole en SVG inline :
-la page ne fait aucune requête réseau, et le fichier reste lisible hors ligne.
+est chargé depuis une URL d'API. `card.html` embarque le symbole en PNG dans le
+fichier lui-même : la page ne fait aucune requête réseau, et reste lisible hors
+ligne.
 
 ## Densité et lisibilité à l'impression
 
@@ -95,10 +96,21 @@ blanc deux fois, à la position transformée et à la position d'origine, et
 abandonnait le tracé du symbole : la carte sortait avec un rectangle blanc vide.
 La cote est maintenant fixée en millimètres, sans transformation.
 
+**Le tracé vectoriel trop lourd.** Le symbole était d'abord embarqué en SVG
+inline. Un QR de version 14 compte plusieurs milliers de sous-chemins, et
+certains lecteurs PDF renoncent à peindre un tracé aussi lourd, surtout découpé
+par un coin arrondi : la carte s'ouvre alors avec un carré blanc vide. La carte
+embarque donc une image, que tout lecteur sait afficher. À 27 mm, ce PNG imprime
+à plus de 1800 points par pouce, bien au-delà de ce que demande l'offset. Le
+`qr-vcard.svg` reste disponible si l'imprimeur préfère du vectoriel.
+
 **La compression par le conteneur flex.** Le QR du verso était déclaré à 34 mm
 mais le conteneur le ramenait à 25 mm, faute de `flex-shrink: 0`, soit une
 densité pire que celle du recto alors que le verso était censé la corriger. La
 mesure dans le PDF confirme aujourd'hui les 30,6 mm de symbole attendus.
+
+Le PDF est contrôlé à 96, 150, 300 et 600 points par pouce : les deux faces
+décodent à chaque résolution, y compris celles d'un lecteur de téléphone.
 
 La leçon tient en une ligne : sur un imprimé, seul le PDF fait foi.
 

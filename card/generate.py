@@ -14,6 +14,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import base64
+import io
 import pathlib
 import sys
 
@@ -125,9 +127,9 @@ def main() -> int:
     )
 
     matrix = qr.get_matrix()
-    svg_dark = matrix_to_svg(matrix, dark="#060b18", light=None)
+    # Le SVG reste le livrable destine a l'imprimeur.
     (HERE / "qr-vcard.svg").write_text(
-        matrix_to_svg(matrix, dark="#060b18", light="#ffffff"), encoding="utf-8"
+        matrix_to_svg(matrix, dark="#000000", light="#ffffff"), encoding="utf-8"
     )
 
     img = qr.make_image(fill_color="black", back_color="white")
@@ -135,14 +137,23 @@ def main() -> int:
     img = img.resize((px, px))
     img.save(HERE / "qr-vcard.png")
 
-    template = (HERE / "card.template.html").read_text(encoding="utf-8")
-    (HERE / "card.html").write_text(
-        template.replace("<!--QR_SVG-->", svg_dark), encoding="utf-8"
-    )
+    # La carte embarque le PNG, pas le SVG. Un symbole de version 14 fait
+    # plusieurs milliers de sous-chemins : certains lecteurs PDF renoncent a
+    # peindre un trace aussi lourd, surtout decoupe par un coin arrondi, et la
+    # carte sort avec un carre blanc vide. Une image, tout lecteur sait
+    # l'afficher. A 27 mm, ce PNG imprime a plus de 1800 points par pouce.
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG", optimize=True)
+    data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    tag = f'<img src="{data_uri}" alt="QR code vCard Sami Bey">'
 
+    template = (HERE / "card.template.html").read_text(encoding="utf-8")
+    (HERE / "card.html").write_text(template.replace("<!--QR_IMG-->", tag), encoding="utf-8")
+
+    dpi_recto = px / (27.0 / 25.4)
     print(f"\nqr-vcard.svg   vectoriel, pour l'imprimeur")
-    print(f"qr-vcard.png   {px}x{px} px")
-    print(f"card.html      carte 85x55 mm, QR integre en SVG inline")
+    print(f"qr-vcard.png   {px}x{px} px, soit {dpi_recto:.0f} dpi a 27 mm")
+    print(f"card.html      carte 85x55 mm, QR embarque en PNG")
     return 0
 
 
