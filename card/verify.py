@@ -32,6 +32,19 @@ def expected_bytes(compact: bool) -> bytes:
     return ("\r\n".join(lines) + "\r\n").encode("utf-8")
 
 
+def modules_side(data: bytes, ecc: str = "M") -> int:
+    """Cote du symbole en modules, zone de silence exclue."""
+    import qrcode
+    from qrcode.constants import ERROR_CORRECT_M, ERROR_CORRECT_Q
+
+    qr = qrcode.QRCode(
+        error_correction={"M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q}[ecc], border=4
+    )
+    qr.add_data(data.decode("utf-8"))
+    qr.make(fit=True)
+    return qr.modules_count
+
+
 def decode(png: pathlib.Path) -> tuple[bytes, str]:
     """Retourne les octets decodes et le nom du decodeur utilise."""
     try:
@@ -57,6 +70,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--compact", action="store_true")
     ap.add_argument("--png", default="qr-vcard.png")
+    ap.add_argument("--pdf", help="controle aussi le PDF d'impression")
     args = ap.parse_args()
 
     png = HERE / args.png
@@ -80,6 +94,22 @@ def main() -> int:
     props = sum(1 for l in text.split("\r\n") if l)
     print(f"ok ({decoder}) : {len(got)} octets decodes, identiques a vcard.vcf")
     print(f"   {props} proprietes, accents preserves (MOSAIK, Ingenieur, separateurs)")
+
+    if args.pdf:
+        import check_pdf
+
+        pdf = HERE / args.pdf
+        if not pdf.exists():
+            print(f"{pdf.name} absent : lancer d'abord node export-pdf.js", file=sys.stderr)
+            return 1
+        print(f"controle de {pdf.name} :")
+        errors = check_pdf.check(pdf, want, modules_side(want))
+        if errors:
+            for e in errors:
+                print(f"echec : {e}", file=sys.stderr)
+            return 1
+        print("   les deux faces decodent et restituent la vCard")
+
     return 0
 
 

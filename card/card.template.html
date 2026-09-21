@@ -129,11 +129,14 @@
 
   /* Le QR : carre blanc de 30 mm, 1,5 mm de marge, 27 mm de modules.
      La marge blanche prolonge la zone de silence du symbole. */
+  /* Pas de centrage par translateY(-50%) : a l'impression, Chromium peint
+     le fond a la fois a la position transformee et a la position d'origine,
+     et laisse tomber le trace du QR. La cote est donc fixee en mm :
+     (55 - 30) / 2 = 12,5 mm. */
   .qr {
     position: absolute;
-    top: 50%;
+    top: 12.5mm;
     right: 5mm;
-    transform: translateY(-50%);
     width: 30mm;
     height: 30mm;
     padding: 1.5mm;
@@ -153,17 +156,19 @@
   }
 
   .verso .marque { color: var(--encre); }
-  .verso .bloc-verso { text-align: center; }
-  .verso .accroche { color: #5a6c8c; margin: 1.4mm auto 0; }
+  .verso .bloc-verso { text-align: center; width: 30mm; }
+  .verso .accroche { color: #5a6c8c; margin: 1.4mm auto 0; max-width: 30mm; }
   .verso .filet { margin: 2.4mm auto; }
 
+  /* flex-shrink: 0 est indispensable : sans lui le conteneur comprime le
+     symbole a 25 mm, soit une densite pire que celle du recto. */
   .verso .qr {
     position: static;
-    transform: none;
+    flex: 0 0 34mm;
     width: 34mm;
     height: 34mm;
     padding: 0;
-    margin-right: 6mm;
+    margin-right: 5mm;
   }
 
   .verso .qr svg path { fill: var(--encre); }
@@ -173,7 +178,7 @@
     color: #5a6c8c;
     letter-spacing: 0.22mm;
     text-transform: uppercase;
-    white-space: nowrap;
+    line-height: 1.5;
     margin-top: 1.8mm;
   }
 
