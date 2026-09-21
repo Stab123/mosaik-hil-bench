@@ -1,0 +1,56 @@
+name: pages
+
+# Publie site/ sur GitHub Pages. La page sert la fiche de contact dont
+# l'adresse est encodee dans le QR de la carte de visite.
+#
+# A activer une fois dans les reglages du depot : Settings > Pages >
+# Source : GitHub Actions. Sans cela, le workflow ne publie rien et
+# l'adresse du QR reste introuvable.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Une seule publication a la fois, sans annuler celle qui est en cours.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publier:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploiement.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verifier que la fiche est valide
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          fiche = pathlib.Path('site/contact.vcf').read_text(encoding='utf-8')
+          attendu = pathlib.Path('card/vcard.vcf').read_text(encoding='utf-8')
+          if fiche != attendu:
+              sys.exit('site/contact.vcf a devie de card/vcard.vcf')
+          for champ in ('BEGIN:VCARD', 'FN:', 'TEL', 'EMAIL', 'END:VCARD'):
+              if champ not in fiche:
+                  sys.exit(f'champ manquant dans la fiche : {champ}')
+          print(f'fiche conforme, {len(fiche.encode())} octets')
+          PY
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploiement
+        uses: actions/deploy-pages@v4

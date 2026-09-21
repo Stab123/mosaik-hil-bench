@@ -30,7 +30,7 @@ TRANSLITTERATION = {
 
 FORMATS = ("vcard3", "vcard21", "mecard", "url")
 
-# Page publiee par GitHub Pages depuis docs/. Le QR au format "url" ne porte
+# Page publiee par GitHub Pages depuis site/, via .github/workflows/pages.yml. Le QR au format "url" ne porte
 # que cette adresse : le telephone ouvre une page dont le bouton reemballe la
 # fiche avec le type text/vcard, ce qui declenche l'import. Ce detour existe
 # parce que certains appareils photo ne routent aucune fiche vers l'ecran

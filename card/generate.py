@@ -156,12 +156,12 @@ def main() -> int:
     data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     tag = f'<img src="{data_uri}" alt="QR code vCard Sami Bey">'
 
-    publie = HERE.parent / "docs" / "contact.vcf"
+    publie = HERE.parent / "site" / "contact.vcf"
     if publie.parent.exists():
         source_texte = source.read_text(encoding="utf-8")
         if publie.read_text(encoding="utf-8") != source_texte:
             publie.write_text(source_texte, encoding="utf-8")
-            print(f"docs/contact.vcf realigne sur {source.name}")
+            print(f"site/contact.vcf realigne sur {source.name}")
 
     template = (HERE / "card.template.html").read_text(encoding="utf-8")
     (HERE / "card.html").write_text(template.replace("<!--QR_IMG-->", tag), encoding="utf-8")

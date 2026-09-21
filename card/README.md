@@ -70,11 +70,22 @@ python3 generate.py --format url
 Le QR tombe à 43 octets, version 4, 33 modules, soit 0,707 mm par module : près
 de deux fois plus gros que celui de la vCard, et d'autant plus facile à lire.
 
-**Mise en ligne.** Le dossier `docs/` à la racine du dépôt contient la page et
-la fiche. Dans les réglages GitHub du dépôt, section Pages, choisir la branche
-`main` et le dossier `/docs`. La page est alors servie à l'adresse inscrite dans
-`formats.py` sous `URL_PAGE`. Tant que Pages n'est pas activé, un QR au format
-`url` pointe vers une page inexistante.
+**Mise en ligne.** Le dossier `site/` à la racine du dépôt contient la page et
+la fiche. Deux conditions, toutes deux nécessaires :
+
+1. Dans les réglages GitHub du dépôt, section Pages, choisir comme source
+   « GitHub Actions ». Le workflow `.github/workflows/pages.yml` fait le reste.
+2. Fusionner la branche de travail dans `main`. Le workflow ne publie que
+   depuis `main` : tant que `site/` n'y est pas, il n'y a rien à servir.
+
+La page est ensuite servie à l'adresse inscrite dans `formats.py` sous
+`URL_PAGE`. Tant que ces deux conditions ne sont pas remplies, un QR au format
+`url` mène à une page inexistante.
+
+Le workflow contrôle au passage que `site/contact.vcf` n'a pas dévié de
+`card/vcard.vcf` et que la fiche porte bien ses champs essentiels. Une fiche
+désynchronisée fait échouer la publication plutôt que de mettre en ligne des
+coordonnées périmées.
 
 **Ce que cela publie.** Le téléphone, le courriel et l'adresse postale
 deviennent accessibles à une adresse publique. Ce sont les mêmes informations
@@ -86,7 +97,7 @@ cause.
 avec le type `text/vcard` et le remet au navigateur sous le nom `Sami-Bey.vcf`.
 Ce réemballage garantit le bon type quel que soit celui que le serveur annonce,
 et c'est ce type qui déclenche l'import dans le carnet d'adresses. La fiche
-n'est pas recopiée dans la page : `generate.py` réaligne `docs/contact.vcf` sur
+n'est pas recopiée dans la page : `generate.py` réaligne `site/contact.vcf` sur
 `vcard.vcf` à chaque exécution.
 
 ## Quand le téléphone ouvre un sélecteur au lieu d'une fiche
