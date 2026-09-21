@@ -12,7 +12,7 @@ généré et vérifié localement.
 | `generate.py` | Produit le QR vectoriel et matriciel, puis assemble `card.html`. |
 | `verify.py` | Décode le QR produit et le compare à la source, image et PDF. |
 | `check_pdf.py` | Décode chaque page du PDF et mesure la taille de module réelle. |
-| `export-pdf.js` | Exporte une page HTML en PDF au format voulu. |
+| `export-pdf.js` | Exporte une page HTML en PDF, à l'octet près reproductible. |
 | `test-scan.py` | Planche de diagnostic pour trouver la limite d'un téléphone. |
 | `card.template.html` | Maquette recto/verso. `<!--QR_IMG-->` reçoit le symbole. |
 | `card.html` | Carte générée, QR embarqué en PNG. Aucune ressource externe. |
@@ -165,6 +165,14 @@ Le PDF est contrôlé à 96, 150, 300 et 600 points par pouce : les deux faces
 décodent à chaque résolution, y compris celles d'un lecteur de téléphone.
 
 La leçon tient en une ligne : sur un imprimé, seul le PDF fait foi.
+
+## Export reproductible
+
+Chromium date chaque export, si bien qu'un PDF régénéré différait du précédent
+par quatre octets alors que son contenu était identique. Le fichier étant suivi
+par git, chaque exécution produisait un faux diff. `export-pdf.js` fige donc
+l'horodatage après l'export. Deux exports successifs donnent maintenant le même
+fichier au bit près, et un diff sur le PDF signale un vrai changement.
 
 ## Vérification
 
