@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Carte de visite MOSAÏK — Sami Bey</title>
+<style>
+  /* Carte de visite au format europeen normalise : 85 x 55 mm.
+     Toutes les dimensions sont en millimetres, donc l'impression sort a
+     l'echelle exacte. L'ecran n'est qu'un apercu mis a l'echelle. */
+
+  :root {
+    --encre: #060b18;
+    --papier: #ffffff;
+    --accent: #3b82f6;
+    --texte: #e8eefc;
+    --texte-doux: #9bb2d4;
+    --alerte: #ef4444;
+    --bord: #1a233a;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 12mm 8mm 4mm;
+    background: #0d1220;
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10mm;
+  }
+
+  .legende {
+    color: #7e93b8;
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    text-align: center;
+  }
+
+  /* Apercu ecran : la carte est dessinee en mm puis agrandie sans
+     deformation. transform n'affecte pas l'impression. */
+  .apercu {
+    width: 85mm;
+    height: 55mm;
+    transform: scale(1.8);
+    transform-origin: top center;
+    margin-bottom: 46mm;
+  }
+
+  .carte {
+    width: 85mm;
+    height: 55mm;
+    padding: 5mm;
+    position: relative;
+    overflow: hidden;
+    border-radius: 1.5mm;
+    background: var(--encre);
+    color: var(--texte);
+    display: flex;
+    align-items: flex-start;
+  }
+
+  .colonne { width: 42mm; }
+
+  .marque {
+    font-size: 15pt;
+    font-weight: 800;
+    letter-spacing: 1.2mm;
+    line-height: 1;
+  }
+
+  .accroche {
+    font-size: 5pt;
+    color: var(--texte-doux);
+    margin-top: 1.2mm;
+    line-height: 1.35;
+    max-width: 42mm;
+  }
+
+  .filet {
+    height: 0.6mm;
+    width: 10mm;
+    background: var(--accent);
+    margin: 2.6mm 0;
+  }
+
+  .nom { font-size: 11pt; font-weight: 700; line-height: 1; }
+
+  .fonction {
+    font-size: 6pt;
+    color: #c5d2e8;
+    margin-top: 0.9mm;
+  }
+
+  .coordonnees {
+    font-size: 5.6pt;
+    line-height: 1.55;
+    margin-top: 2.4mm;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .coordonnees a { color: inherit; text-decoration: none; }
+
+  .affiliations {
+    position: absolute;
+    left: 5mm;
+    bottom: 4.4mm;
+    display: flex;
+    flex-direction: column;
+    gap: 0.8mm;
+  }
+
+  .ligne-affiliation { display: flex; align-items: center; gap: 1.2mm; }
+
+  .etiquette {
+    background: var(--alerte);
+    color: #fff;
+    font-size: 4pt;
+    font-weight: 700;
+    letter-spacing: 0.2mm;
+    padding: 0.3mm 0.9mm;
+    border-radius: 0.4mm;
+  }
+
+  .affiliation { font-size: 4.6pt; color: #cbd5e1; }
+
+  /* Le QR : carre blanc de 30 mm, 1,5 mm de marge, 27 mm de modules.
+     La marge blanche prolonge la zone de silence du symbole. */
+  .qr {
+    position: absolute;
+    top: 50%;
+    right: 5mm;
+    transform: translateY(-50%);
+    width: 30mm;
+    height: 30mm;
+    padding: 1.5mm;
+    background: var(--papier);
+    border-radius: 1mm;
+  }
+
+  .qr svg { width: 100%; height: 100%; display: block; }
+
+  /* Verso : encre sombre sur papier blanc, pour qui prefere un QR au dos. */
+  .carte.verso {
+    background: var(--papier);
+    color: var(--encre);
+    align-items: center;
+    justify-content: center;
+    border: 0.2mm solid #dbe3f0;
+  }
+
+  .verso .marque { color: var(--encre); }
+  .verso .bloc-verso { text-align: center; }
+  .verso .accroche { color: #5a6c8c; margin: 1.4mm auto 0; }
+  .verso .filet { margin: 2.4mm auto; }
+
+  .verso .qr {
+    position: static;
+    transform: none;
+    width: 34mm;
+    height: 34mm;
+    padding: 0;
+    margin-right: 6mm;
+  }
+
+  .verso .qr svg path { fill: var(--encre); }
+
+  .invite {
+    font-size: 4.4pt;
+    color: #5a6c8c;
+    letter-spacing: 0.22mm;
+    text-transform: uppercase;
+    white-space: nowrap;
+    margin-top: 1.8mm;
+  }
+
+  @page { size: 85mm 55mm; margin: 0; }
+
+  @media print {
+    body { padding: 0; background: #fff; gap: 0; display: block; }
+    .legende { display: none; }
+    .apercu { transform: none; margin: 0; width: auto; height: auto; }
+    .carte {
+      border-radius: 0;
+      page-break-after: always;
+      break-after: page;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .carte.verso { border: none; }
+  }
+</style>
+</head>
+<body>
+
+  <p class="legende">Recto — 85 × 55 mm</p>
+  <div class="apercu">
+    <div class="carte">
+      <div class="colonne">
+        <div class="marque">MOSAÏK</div>
+        <div class="accroche">Architecture distribuée pour systèmes spatiaux résilients</div>
+        <div class="filet"></div>
+        <div class="nom">Sami Bey</div>
+        <div class="fonction">Fondateur · Ingénieur HES-SO</div>
+        <div class="coordonnees">
+          +41 76 765 26 38<br>
+          neapolis.ge.2008@gmail.com<br>
+          github.com/Stab123/mosaik-hil-bench<br>
+          Route de Berne 285, 1066 Epalinges
+        </div>
+      </div>
+      <div class="affiliations">
+        <div class="ligne-affiliation">
+          <span class="etiquette">MEMBRE</span>
+          <span class="affiliation">Swiss Engineering STV · UTS · ATS</span>
+        </div>
+        <div class="ligne-affiliation">
+          <span class="etiquette">MEMBRE</span>
+          <span class="affiliation">SSIP · Lucerne</span>
+        </div>
+      </div>
+      <div class="qr"><!--QR_SVG--></div>
+    </div>
+  </div>
+
+  <p class="legende">Verso — QR agrandi, encre sombre sur papier</p>
+  <div class="apercu">
+    <div class="carte verso">
+      <div class="qr"><!--QR_SVG--></div>
+      <div class="bloc-verso">
+        <div class="marque">MOSAÏK</div>
+        <div class="accroche">Sami Bey · Fondateur</div>
+        <div class="filet"></div>
+        <div class="invite">Scannez pour enregistrer le contact</div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

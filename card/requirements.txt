@@ -1,0 +1,8 @@
+# Generation du QR code
+qrcode>=7.4
+pillow>=10.0
+
+# Verification : zxing-cpp decode comme les applications de scan reelles.
+# opencv sert de secours et de chargeur d'image.
+zxing-cpp>=2.2
+opencv-python-headless>=4.9
