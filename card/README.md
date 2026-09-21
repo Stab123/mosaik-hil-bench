@@ -8,7 +8,7 @@ généré et vérifié localement.
 | Fichier | Rôle |
 | --- | --- |
 | `vcard.vcf` | Source de vérité des coordonnées. Tout le reste en découle. |
-| `formats.py` | Les trois formats de contact : vCard 3.0, vCard 2.1, MECARD. |
+| `formats.py` | Les formats portés par le QR : vCard 3.0, vCard 2.1, MECARD, URL. |
 | `generate.py` | Produit le QR vectoriel et matriciel, puis assemble `card.html`. |
 | `verify.py` | Décode le QR produit et le compare à la source, image et PDF. |
 | `check_pdf.py` | Décode chaque page du PDF et mesure la taille de module réelle. |
@@ -34,6 +34,7 @@ python3 verify.py --pdf carte-mosaik-recto-verso.pdf  # contrôle de bout en bou
 Options :
 
 ```sh
+python3 generate.py --format url      # le QR porte l'adresse de la page publiée
 python3 generate.py --format mecard   # format compact, mieux reconnu sur Android
 python3 generate.py --format vcard21  # vCard 2.1, pour analyseurs anciens
 python3 generate.py --full            # inclut ADR et NOTE dans le QR
@@ -49,6 +50,44 @@ affiliations, toutes deux imprimées en clair sur la carte. Les y remettre fait
 passer le symbole de la version 11 à la version 14, soit de 61 à 73 modules,
 et dégrade la lisibilité au scan sans rien apporter au lecteur. `--full` rétablit
 le contenu intégral si le besoin s'en fait sentir.
+
+## Quand aucun format encodé ne déclenche l'enregistrement
+
+Si ni la vCard ni MECARD n'ouvrent de fiche à enregistrer, le problème n'est
+plus la charge utile : cet appareil photo ne route aucune fiche vers l'écran
+d'enregistrement, quel que soit le format encodé dans le symbole. Aucune
+modification du QR n'y changera quoi que ce soit.
+
+Le seul mécanisme qui fonctionne alors est celui des cartes de visite
+numériques commerciales : le QR ne porte pas la fiche, il porte l'adresse d'une
+page qui en sert une. Scanner une adresse, tous les appareils photo savent le
+faire.
+
+```sh
+python3 generate.py --format url
+```
+
+Le QR tombe à 43 octets, version 4, 33 modules, soit 0,707 mm par module : près
+de deux fois plus gros que celui de la vCard, et d'autant plus facile à lire.
+
+**Mise en ligne.** Le dossier `docs/` à la racine du dépôt contient la page et
+la fiche. Dans les réglages GitHub du dépôt, section Pages, choisir la branche
+`main` et le dossier `/docs`. La page est alors servie à l'adresse inscrite dans
+`formats.py` sous `URL_PAGE`. Tant que Pages n'est pas activé, un QR au format
+`url` pointe vers une page inexistante.
+
+**Ce que cela publie.** Le téléphone, le courriel et l'adresse postale
+deviennent accessibles à une adresse publique. Ce sont les mêmes informations
+que celles imprimées sur la carte, mais elles passent d'un support remis en main
+propre à une page indexable. C'est une décision à prendre en connaissance de
+cause.
+
+**Comment la page procède.** Le bouton lit `contact.vcf`, réemballe son contenu
+avec le type `text/vcard` et le remet au navigateur sous le nom `Sami-Bey.vcf`.
+Ce réemballage garantit le bon type quel que soit celui que le serveur annonce,
+et c'est ce type qui déclenche l'import dans le carnet d'adresses. La fiche
+n'est pas recopiée dans la page : `generate.py` réaligne `docs/contact.vcf` sur
+`vcard.vcf` à chaque exécution.
 
 ## Quand le téléphone ouvre un sélecteur au lieu d'une fiche
 
@@ -68,6 +107,7 @@ Trois formats sont donc disponibles, portant le même contact.
 | `vcard3` | 238 | 11 | 61 | RFC 2426, le standard, défaut |
 | `vcard21` | 228 | 11 | 61 | version antérieure, analyseurs anciens |
 | `mecard` | 160 | 9 | 53 | né du mobile, souvent mieux reconnu sur Android |
+| `url` | 43 | 4 | 33 | pas une fiche, l'adresse d'une page qui en sert une |
 
 MECARD est à la fois le mieux reconnu par les appareils photo Android et le
 moins dense, d'où un symbole nettement plus lisible. Il n'a en revanche ni

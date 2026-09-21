@@ -107,6 +107,10 @@ def main() -> int:
         help="format de contact porte par le QR",
     )
     ap.add_argument(
+        "--url", default=formats.URL_PAGE,
+        help="adresse portee par le QR quand --format url est choisi",
+    )
+    ap.add_argument(
         "--full", action="store_true",
         help="inclut ADR et NOTE dans le QR (symbole nettement plus dense)",
     )
@@ -120,7 +124,7 @@ def main() -> int:
     args = ap.parse_args()
 
     source = HERE / "vcard.vcf"
-    data = formats.payload(source, args.kind, args.full, args.accents)
+    data = formats.payload(source, args.kind, args.full, args.accents, args.url)
     qr = build_qr(data, args.ecc, args.border)
     report(f"{args.kind} retenu", data, qr, args.ecc)
 
@@ -128,7 +132,7 @@ def main() -> int:
     for kind in formats.FORMATS:
         if kind == args.kind:
             continue
-        other = formats.payload(source, kind, args.full, args.accents)
+        other = formats.payload(source, kind, args.full, args.accents, args.url)
         report(kind, other, build_qr(other, args.ecc, args.border), args.ecc)
 
     matrix = qr.get_matrix()
@@ -151,6 +155,13 @@ def main() -> int:
     img.save(buffer, format="PNG", optimize=True)
     data_uri = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     tag = f'<img src="{data_uri}" alt="QR code vCard Sami Bey">'
+
+    publie = HERE.parent / "docs" / "contact.vcf"
+    if publie.parent.exists():
+        source_texte = source.read_text(encoding="utf-8")
+        if publie.read_text(encoding="utf-8") != source_texte:
+            publie.write_text(source_texte, encoding="utf-8")
+            print(f"docs/contact.vcf realigne sur {source.name}")
 
     template = (HERE / "card.template.html").read_text(encoding="utf-8")
     (HERE / "card.html").write_text(template.replace("<!--QR_IMG-->", tag), encoding="utf-8")

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sami Bey — MOSAÏK</title>
+<meta name="description" content="Fiche de contact de Sami Bey, fondateur de MOSAÏK.">
+<style>
+  :root {
+    --encre: #060b18;
+    --accent: #3b82f6;
+    --texte: #e8eefc;
+    --doux: #9bb2d4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--encre);
+    color: var(--texte);
+    font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px 16px;
+  }
+  main { width: 100%; max-width: 420px; }
+  .marque { font-size: 28px; font-weight: 800; letter-spacing: 6px; line-height: 1; }
+  .accroche { font-size: 13px; color: var(--doux); margin-top: 8px; line-height: 1.5; }
+  .filet { height: 3px; width: 44px; background: var(--accent); margin: 22px 0; }
+  h1 { font-size: 26px; margin: 0; font-weight: 700; }
+  .fonction { font-size: 14px; color: #c5d2e8; margin-top: 4px; }
+  dl { margin: 24px 0 0; font-size: 15px; line-height: 1.6; }
+  dt { color: var(--doux); font-size: 11px; text-transform: uppercase; letter-spacing: 1px; margin-top: 14px; }
+  dd { margin: 2px 0 0; }
+  dd a { color: var(--texte); text-decoration: none; border-bottom: 1px solid #22304d; }
+  .enregistrer {
+    display: block;
+    width: 100%;
+    margin-top: 28px;
+    padding: 18px 20px;
+    font-size: 17px;
+    font-weight: 700;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 10px;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .enregistrer:active { background: #2563eb; }
+  .note { font-size: 12px; color: #6f83a6; margin-top: 14px; line-height: 1.5; }
+  @media (prefers-reduced-motion: no-preference) { .enregistrer { transition: background .15s; } }
+</style>
+</head>
+<body>
+  <main>
+    <div class="marque">MOSAÏK</div>
+    <p class="accroche">Architecture distribuée pour systèmes spatiaux résilients</p>
+    <div class="filet"></div>
+
+    <h1>Sami Bey</h1>
+    <p class="fonction">Fondateur · Ingénieur HES-SO</p>
+
+    <dl>
+      <dt>Téléphone</dt>
+      <dd><a href="tel:+41767652638">+41 76 765 26 38</a></dd>
+      <dt>Courriel</dt>
+      <dd><a href="mailto:neapolis.ge.2008@gmail.com">neapolis.ge.2008@gmail.com</a></dd>
+      <dt>Dépôt</dt>
+      <dd><a href="https://github.com/Stab123/mosaik-hil-bench">github.com/Stab123/mosaik-hil-bench</a></dd>
+      <dt>Adresse</dt>
+      <dd>Route de Berne 285, 1066 Epalinges</dd>
+    </dl>
+
+    <button class="enregistrer" id="enregistrer" type="button">Enregistrer le contact</button>
+    <p class="note">
+      Le fichier est construit dans le navigateur, avec le type <code>text/vcard</code>.
+      Le téléphone propose alors directement de l'ajouter au carnet d'adresses.
+    </p>
+  </main>
+
+<script>
+// La fiche n'est pas recopiee ici : elle est lue dans contact.vcf, seule
+// source de verite, puis reemballee avec le type text/vcard. C'est ce type
+// qui declenche l'import dans le carnet d'adresses, quel que soit celui que
+// le serveur annonce pour un fichier .vcf.
+const bouton = document.getElementById('enregistrer');
+
+bouton.addEventListener('click', async function () {
+  bouton.disabled = true;
+  try {
+    const reponse = await fetch('contact.vcf', { cache: 'no-store' });
+    if (!reponse.ok) throw new Error('HTTP ' + reponse.status);
+    const texte = await reponse.text();
+
+    const blob = new Blob([texte], { type: 'text/vcard;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const lien = document.createElement('a');
+    lien.href = url;
+    lien.download = 'Sami-Bey.vcf';
+    document.body.appendChild(lien);
+    lien.click();
+    document.body.removeChild(lien);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 2000);
+  } catch (erreur) {
+    // Repli : laisser le navigateur ouvrir le fichier directement.
+    window.location.href = 'contact.vcf';
+  } finally {
+    bouton.disabled = false;
+  }
+});
+</script>
+</body>
+</html>

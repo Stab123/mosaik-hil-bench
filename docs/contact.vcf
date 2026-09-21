@@ -1,0 +1,12 @@
+BEGIN:VCARD
+VERSION:3.0
+N:Bey;Sami;;;
+FN:Sami Bey
+TITLE:Fondateur · Ingénieur HES-SO
+ORG:MOSAÏK
+TEL;TYPE=CELL:+41767652638
+EMAIL;TYPE=INTERNET:neapolis.ge.2008@gmail.com
+URL:https://github.com/Stab123/mosaik-hil-bench
+ADR;TYPE=WORK:;;Route de Berne 285;Epalinges;;1066;Suisse
+NOTE:Membre Swiss Engineering STV / SSIP Lucerne
+END:VCARD

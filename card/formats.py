@@ -5,6 +5,9 @@ Tous decrivent la meme personne. Ils different par ce que le lecteur en
 fait, et c'est la tout l'enjeu : un telephone qui ouvre un selecteur de
 contact au lieu d'une fiche a enregistrer n'a pas reconnu le format.
 
+url      Pas une fiche mais l'adresse d'une page qui en sert une. Le seul
+         mecanisme qui fonctionne quand l'appareil photo refuse de traiter
+         les fiches encodees directement dans le symbole.
 vcard3   RFC 2426. Le plus riche, le standard des ordinateurs et d'iOS.
 vcard21  La version anterieure, encore attendue par de vieux analyseurs.
 mecard   Format compact ne de l'ecosysteme mobile japonais, que les
@@ -25,7 +28,14 @@ TRANSLITTERATION = {
     "Ç": "C", "ç": "c", "·": "-", "’": "'", "–": "-", "—": "-",
 }
 
-FORMATS = ("vcard3", "vcard21", "mecard")
+FORMATS = ("vcard3", "vcard21", "mecard", "url")
+
+# Page publiee par GitHub Pages depuis docs/. Le QR au format "url" ne porte
+# que cette adresse : le telephone ouvre une page dont le bouton reemballe la
+# fiche avec le type text/vcard, ce qui declenche l'import. Ce detour existe
+# parce que certains appareils photo ne routent aucune fiche vers l'ecran
+# d'enregistrement, quel que soit le format encode dans le symbole.
+URL_PAGE = "https://stab123.github.io/mosaik-hil-bench/"
 
 
 def to_ascii(text: str) -> str:
@@ -62,10 +72,13 @@ def _escape_mecard(value: str) -> str:
     return value
 
 
-def build(fields: dict[str, str], kind: str, full: bool) -> str:
+def build(fields: dict[str, str], kind: str, full: bool, url: str = URL_PAGE) -> str:
     """Assemble la charge utile. `full` ajoute l'adresse postale et la note."""
     if kind not in FORMATS:
         raise ValueError(f"format inconnu : {kind}")
+
+    if kind == "url":
+        return url
 
     if kind == "mecard":
         # MECARD n'a ni ORG ni TITLE : ils rejoignent la note, sans quoi
@@ -117,8 +130,10 @@ def build(fields: dict[str, str], kind: str, full: bool) -> str:
     return CRLF.join(lines) + CRLF
 
 
-def payload(path: pathlib.Path, kind: str, full: bool, accents: bool) -> str:
-    data = build(read_fields(path), kind, full)
+def payload(
+    path: pathlib.Path, kind: str, full: bool, accents: bool, url: str = URL_PAGE
+) -> str:
+    data = build(read_fields(path), kind, full, url)
     if not accents:
         data = to_ascii(data)
         if not data.isascii():
