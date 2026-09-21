@@ -24,10 +24,10 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 
 
-def expected_bytes(full: bool, accents: bool) -> bytes:
-    import generate
+def expected_bytes(kind: str, full: bool, accents: bool) -> bytes:
+    import formats
 
-    return generate.read_vcard(HERE / "vcard.vcf", full, accents).encode("utf-8")
+    return formats.payload(HERE / "vcard.vcf", kind, full, accents).encode("utf-8")
 
 
 def modules_side(data: bytes, ecc: str = "M") -> int:
@@ -66,6 +66,7 @@ def decode(png: pathlib.Path) -> tuple[bytes, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--format", default="vcard3", dest="kind", help="format attendu")
     ap.add_argument("--full", action="store_true", help="QR incluant ADR et NOTE")
     ap.add_argument("--accents", action="store_true", help="QR gardant les accents")
     ap.add_argument("--png", default="qr-vcard.png")
@@ -77,7 +78,7 @@ def main() -> int:
         print(f"{png.name} absent : lancer d'abord python3 generate.py", file=sys.stderr)
         return 1
 
-    want = expected_bytes(args.full, args.accents)
+    want = expected_bytes(args.kind, args.full, args.accents)
     got, decoder = decode(png)
 
     if not got:
@@ -90,7 +91,7 @@ def main() -> int:
         return 1
 
     text = got.decode("utf-8")
-    props = sum(1 for l in text.split("\r\n") if l)
+    props = sum(1 for l in text.split("\r\n") if l) if text.startswith("BEGIN") else 1
     print(f"ok ({decoder}) : {len(got)} octets decodes, identiques a la source")
     print(f"   {props} proprietes")
     if got.isascii():

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Genere le QR code vCard et la carte de visite MOSAIK.
+"""Genere le QR code de contact et la carte de visite MOSAIK.
 
-Lit vcard.vcf, ecrit un QR vectoriel (SVG) et matriciel (PNG), puis injecte le
-SVG directement dans card.html a partir de card.template.html. Aucune donnee
-personnelle ne quitte la machine : pas d'appel a un generateur en ligne.
+Lit vcard.vcf, ecrit un QR vectoriel (SVG) et matriciel (PNG), puis assemble
+card.html a partir de card.template.html. Aucune donnee personnelle ne quitte
+la machine : pas d'appel a un generateur en ligne.
 
 Usage:
-    python3 generate.py                # vCard complete, ECC M
-    python3 generate.py --compact      # sans ADR ni NOTE (QR moins dense)
-    python3 generate.py --ecc Q        # correction d'erreur superieure
+    python3 generate.py                   # vCard 3.0, ASCII, sans ADR ni NOTE
+    python3 generate.py --format mecard   # format compact, mieux reconnu
+    python3 generate.py --full            # ajoute l'adresse postale et la note
+    python3 generate.py --accents         # garde les accents dans le QR
+    python3 generate.py --ecc Q           # correction d'erreur superieure
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ import base64
 import io
 import pathlib
 import sys
+
+import formats
 
 try:
     import qrcode
@@ -47,40 +51,6 @@ MODULE_MM_FLOOR = 0.33
 # Cote utile du symbole sur la carte, en millimetres : le carre blanc fait
 # 32 mm avec 1,5 mm de marge, soit 29 mm de modules.
 QR_SVG_MM = 29.0
-
-
-# Un QR en mode octet n'indique pas son jeu de caracteres : la norme suppose
-# ISO-8859-1, et un decodeur qui s'y tient lit "MOSAÃK" la ou UTF-8 ecrivait
-# "MOSAÏK". zxing et les scanners courants devinent bien, mais rien ne
-# l'impose. Le contenu du QR est donc translittere par defaut. La carte
-# imprimee, elle, garde ses accents : ils ne passent pas par le symbole.
-TRANSLITTERATION = {
-    "Ï": "I", "ï": "i", "É": "E", "é": "e", "È": "E", "è": "e",
-    "Ê": "E", "ê": "e", "À": "A", "à": "a", "Â": "A", "â": "a",
-    "Ô": "O", "ô": "o", "Û": "U", "û": "u", "Ù": "U", "ù": "u",
-    "Ç": "C", "ç": "c", "·": "-", "’": "'", "–": "-", "—": "-",
-}
-
-
-def to_ascii(text: str) -> str:
-    return text.translate(str.maketrans(TRANSLITTERATION))
-
-
-def read_vcard(path: pathlib.Path, full: bool, accents: bool) -> str:
-    """Retourne la vCard normalisee en CRLF, comme l'exige la RFC 2426."""
-    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if not full:
-        lines = [l for l in lines if not l.startswith(("ADR", "NOTE"))]
-    data = "\r\n".join(lines) + "\r\n"
-    if not accents:
-        data = to_ascii(data)
-    if not accents and not data.isascii():
-        restants = sorted({c for c in data if not c.isascii()})
-        raise SystemExit(
-            "caracteres non ASCII sans equivalent : " + " ".join(restants)
-            + "\nles ajouter a TRANSLITTERATION, ou passer --accents"
-        )
-    return data
 
 
 def build_qr(data: str, ecc: str, border: int):
@@ -124,7 +94,7 @@ def report(label: str, data: str, qr, ecc: str) -> None:
     else:
         verdict = "TROP DENSE pour une carte de visite"
     print(
-        f"{label:9} {len(data.encode('utf-8')):3} octets  ECC {ecc}  "
+        f"{label:16} {len(data.encode('utf-8')):3} octets  ECC {ecc}  "
         f"version {qr.version:2}  {qr.modules_count}x{qr.modules_count} modules  "
         f"{mm:.3f} mm/module a {QR_SVG_MM:.0f} mm  ->  {verdict}"
     )
@@ -132,6 +102,10 @@ def report(label: str, data: str, qr, ecc: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--format", choices=formats.FORMATS, default="vcard3", dest="kind",
+        help="format de contact porte par le QR",
+    )
     ap.add_argument(
         "--full", action="store_true",
         help="inclut ADR et NOTE dans le QR (symbole nettement plus dense)",
@@ -146,19 +120,16 @@ def main() -> int:
     args = ap.parse_args()
 
     source = HERE / "vcard.vcf"
-    data = read_vcard(source, args.full, args.accents)
+    data = formats.payload(source, args.kind, args.full, args.accents)
     qr = build_qr(data, args.ecc, args.border)
-    retenue = "complete" if args.full else "carte"
-    report(retenue, data, qr, args.ecc)
+    report(f"{args.kind} retenu", data, qr, args.ecc)
 
-    # Variante non retenue, a titre de comparaison.
-    other = read_vcard(source, not args.full, args.accents)
-    report(
-        "carte" if args.full else "complete",
-        other,
-        build_qr(other, args.ecc, args.border),
-        args.ecc,
-    )
+    # Les autres formats, a titre de comparaison.
+    for kind in formats.FORMATS:
+        if kind == args.kind:
+            continue
+        other = formats.payload(source, kind, args.full, args.accents)
+        report(kind, other, build_qr(other, args.ecc, args.border), args.ecc)
 
     matrix = qr.get_matrix()
     # Le SVG reste le livrable destine a l'imprimeur.

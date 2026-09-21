@@ -8,6 +8,7 @@ généré et vérifié localement.
 | Fichier | Rôle |
 | --- | --- |
 | `vcard.vcf` | Source de vérité des coordonnées. Tout le reste en découle. |
+| `formats.py` | Les trois formats de contact : vCard 3.0, vCard 2.1, MECARD. |
 | `generate.py` | Produit le QR vectoriel et matriciel, puis assemble `card.html`. |
 | `verify.py` | Décode le QR produit et le compare à la source, image et PDF. |
 | `check_pdf.py` | Décode chaque page du PDF et mesure la taille de module réelle. |
@@ -33,9 +34,11 @@ python3 verify.py --pdf carte-mosaik-recto-verso.pdf  # contrôle de bout en bou
 Options :
 
 ```sh
-python3 generate.py --full      # inclut ADR et NOTE dans le QR
-python3 generate.py --accents   # garde les accents dans le QR
-python3 generate.py --ecc Q     # correction d'erreur supérieure
+python3 generate.py --format mecard   # format compact, mieux reconnu sur Android
+python3 generate.py --format vcard21  # vCard 2.1, pour analyseurs anciens
+python3 generate.py --full            # inclut ADR et NOTE dans le QR
+python3 generate.py --accents         # garde les accents dans le QR
+python3 generate.py --ecc Q           # correction d'erreur supérieure
 ```
 
 ## Ce que contient le QR
@@ -46,6 +49,32 @@ affiliations, toutes deux imprimées en clair sur la carte. Les y remettre fait
 passer le symbole de la version 11 à la version 14, soit de 61 à 73 modules,
 et dégrade la lisibilité au scan sans rien apporter au lecteur. `--full` rétablit
 le contenu intégral si le besoin s'en fait sentir.
+
+## Quand le téléphone ouvre un sélecteur au lieu d'une fiche
+
+Symptôme : le code est bien détecté, mais appuyer sur « Ajouter un contact »
+ouvre la liste des contacts existants au lieu d'une fiche pré-remplie avec un
+bouton d'enregistrement. Le lecteur a reconnu un numéro de téléphone, pas une
+fiche : il propose donc de rattacher ce numéro à quelqu'un.
+
+La vCard produite est pourtant valide, `vobject` la relit champ par champ. Le
+problème est côté lecteur : tous ne routent pas une vCard vers le formulaire
+d'enregistrement.
+
+Trois formats sont donc disponibles, portant le même contact.
+
+| Format | Octets | Version | Modules | Remarque |
+| --- | ---: | ---: | ---: | --- |
+| `vcard3` | 238 | 11 | 61 | RFC 2426, le standard, défaut |
+| `vcard21` | 228 | 11 | 61 | version antérieure, analyseurs anciens |
+| `mecard` | 160 | 9 | 53 | né du mobile, souvent mieux reconnu sur Android |
+
+MECARD est à la fois le mieux reconnu par les appareils photo Android et le
+moins dense, d'où un symbole nettement plus lisible. Il n'a en revanche ni
+champ organisation ni champ fonction : les deux rejoignent la note de la fiche.
+
+La planche de diagnostic ci-dessous tranche en une minute quel format ce
+téléphone-là accepte.
 
 ## Le QR est en ASCII, pas en UTF-8
 
@@ -78,29 +107,25 @@ carré du recto de 30 à 32 mm.
 
 ## Quand un téléphone refuse de scanner
 
-`test-scan.py` produit une page A4 portant le même contact à quatre densités
-croissantes et à deux tailles d'impression.
+`test-scan.py` produit une page A4 qui pose deux questions distinctes.
 
 ```sh
 python3 test-scan.py
 node export-pdf.js planche-test-scan.pdf planche-test-scan.html
 ```
 
-Imprimer à l'échelle réelle, sans ajustement automatique, puis scanner les codes
-dans l'ordre. Le premier qui résiste situe la limite.
+Imprimer à l'échelle réelle, sans ajustement automatique.
 
-| Code | Contenu | Version | Modules |
-| --- | --- | ---: | ---: |
-| A | URL seule | 4 | 33 |
-| B | contact minimal | 9 | 53 |
-| C | contact de la carte | 11 | 61 |
-| D | contact complet | 14 | 73 |
+**Rangée 1, le format.** Trois codes de 40 mm, même contact, formats différents.
+On cherche celui qui ouvre une fiche pré-remplie avec un bouton
+d'enregistrement. Un code qui ouvre un sélecteur de contact n'a pas été reconnu
+comme une fiche. Si aucun des trois ne donne de fiche, c'est l'appareil photo
+qui ne traite pas les contacts, et Google Lens prend le relais.
 
-Si A passe et que B résiste, le lecteur ne traite que les URL et laisse tomber
-les fiches de contact : c'est une limite de l'application, pas de la carte, et
-Google Lens prend le relais. Si A, B et C passent et que seul D résiste, c'est
-le contenu du QR qu'il faut alléger. Si aucun ne passe à 40 mm, le problème est
-ailleurs : mise au point, éclairage ou reflet.
+**Rangée 2, la densité.** Quatre codes de 25 mm, de l'URL seule au contact
+complet, à taille réduite pour mettre le lecteur en difficulté. Le premier qui
+résiste situe la limite. Si même le code A résiste, le problème est la mise au
+point, l'éclairage ou un reflet.
 
 Scanner un écran est toujours plus difficile que scanner un tirage papier, à
 cause du rétroéclairage et du moiré. Un téléphone ne peut évidemment pas scanner
