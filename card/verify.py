@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verifie que le QR genere restitue exactement la vCard source.
+"""Verifie que le QR genere restitue exactement la vCard attendue.
 
 Un QR qui s'affiche n'est pas un QR qui se scanne. Ce controle decode
 qr-vcard.png et compare les octets obtenus a vcard.vcf, accents compris.
@@ -10,8 +10,9 @@ echoue sur les symboles de version elevee comme celui-ci : son echec ne dit
 rien de la lisibilite reelle du code.
 
 Usage:
-    python3 verify.py             # vCard complete
-    python3 verify.py --compact   # variante sans ADR ni NOTE
+    python3 verify.py                                     # variante de la carte
+    python3 verify.py --full                              # QR incluant ADR et NOTE
+    python3 verify.py --pdf carte-mosaik-recto-verso.pdf  # controle aussi le PDF
 """
 
 from __future__ import annotations
@@ -23,13 +24,10 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 
 
-def expected_bytes(compact: bool) -> bytes:
-    lines = [
-        l for l in (HERE / "vcard.vcf").read_text(encoding="utf-8").splitlines() if l.strip()
-    ]
-    if compact:
-        lines = [l for l in lines if not l.startswith(("ADR", "NOTE"))]
-    return ("\r\n".join(lines) + "\r\n").encode("utf-8")
+def expected_bytes(full: bool, accents: bool) -> bytes:
+    import generate
+
+    return generate.read_vcard(HERE / "vcard.vcf", full, accents).encode("utf-8")
 
 
 def modules_side(data: bytes, ecc: str = "M") -> int:
@@ -68,7 +66,8 @@ def decode(png: pathlib.Path) -> tuple[bytes, str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--compact", action="store_true")
+    ap.add_argument("--full", action="store_true", help="QR incluant ADR et NOTE")
+    ap.add_argument("--accents", action="store_true", help="QR gardant les accents")
     ap.add_argument("--png", default="qr-vcard.png")
     ap.add_argument("--pdf", help="controle aussi le PDF d'impression")
     args = ap.parse_args()
@@ -78,7 +77,7 @@ def main() -> int:
         print(f"{png.name} absent : lancer d'abord python3 generate.py", file=sys.stderr)
         return 1
 
-    want = expected_bytes(args.compact)
+    want = expected_bytes(args.full, args.accents)
     got, decoder = decode(png)
 
     if not got:
@@ -92,8 +91,13 @@ def main() -> int:
 
     text = got.decode("utf-8")
     props = sum(1 for l in text.split("\r\n") if l)
-    print(f"ok ({decoder}) : {len(got)} octets decodes, identiques a vcard.vcf")
-    print(f"   {props} proprietes, accents preserves (MOSAIK, Ingenieur, separateurs)")
+    print(f"ok ({decoder}) : {len(got)} octets decodes, identiques a la source")
+    print(f"   {props} proprietes")
+    if got.isascii():
+        print("   contenu entierement ASCII : aucune ambiguite de jeu de caracteres")
+    else:
+        print("   ATTENTION : contenu non ASCII sans marqueur ECI, lecture "
+              "dependante du decodeur")
 
     if args.pdf:
         import check_pdf

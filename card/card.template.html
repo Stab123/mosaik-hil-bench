@@ -63,7 +63,7 @@
     align-items: flex-start;
   }
 
-  .colonne { width: 42mm; }
+  .colonne { width: 40mm; }
 
   .marque {
     font-size: 15pt;
@@ -77,7 +77,7 @@
     color: var(--texte-doux);
     margin-top: 1.2mm;
     line-height: 1.35;
-    max-width: 42mm;
+    max-width: 40mm;
   }
 
   .filet {
@@ -132,13 +132,13 @@
   /* Pas de centrage par translateY(-50%) : a l'impression, Chromium peint
      le fond a la fois a la position transformee et a la position d'origine,
      et laisse tomber le trace du QR. La cote est donc fixee en mm :
-     (55 - 30) / 2 = 12,5 mm. */
+     (55 - 32) / 2 = 11,5 mm. */
   .qr {
     position: absolute;
-    top: 12.5mm;
+    top: 11.5mm;
     right: 5mm;
-    width: 30mm;
-    height: 30mm;
+    width: 32mm;
+    height: 32mm;
     padding: 1.5mm;
     background: var(--papier);
   }

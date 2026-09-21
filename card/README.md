@@ -1,7 +1,7 @@
 # Carte de visite MOSAÏK
 
 Carte de visite au format européen normalisé 85 × 55 mm, QR code vCard intégré,
-générée et vérifiée localement.
+généré et vérifié localement.
 
 ## Contenu
 
@@ -9,105 +9,132 @@ générée et vérifiée localement.
 | --- | --- |
 | `vcard.vcf` | Source de vérité des coordonnées. Tout le reste en découle. |
 | `generate.py` | Produit le QR vectoriel et matriciel, puis assemble `card.html`. |
-| `verify.py` | Décode le QR produit et compare les octets à `vcard.vcf`. |
+| `verify.py` | Décode le QR produit et le compare à la source, image et PDF. |
 | `check_pdf.py` | Décode chaque page du PDF et mesure la taille de module réelle. |
-| `export-pdf.js` | Exporte `card.html` en PDF de deux pages 85 × 55 mm. |
+| `export-pdf.js` | Exporte une page HTML en PDF au format voulu. |
+| `test-scan.py` | Planche de diagnostic pour trouver la limite d'un téléphone. |
 | `card.template.html` | Maquette recto/verso. `<!--QR_IMG-->` reçoit le symbole. |
 | `card.html` | Carte générée, QR embarqué en PNG. Aucune ressource externe. |
-| `qr-vcard.svg` | QR vectoriel, à remettre à l'imprimeur s'il le demande. |
-| `qr-vcard.png` | QR matriciel 1944 × 1944 px. |
 | `carte-mosaik-recto-verso.pdf` | PDF d'impression, deux pages sans marge. |
+| `qr-vcard.svg` | QR vectoriel, si l'imprimeur préfère du vectoriel. |
+| `qr-vcard.png` | QR matriciel haute résolution. |
 
 ## Utilisation
 
 ```sh
 pip install -r requirements.txt
-python3 generate.py                      # qr-vcard.svg, qr-vcard.png, card.html
-node export-pdf.js                       # carte-mosaik-recto-verso.pdf
-python3 verify.py --pdf carte-mosaik-recto-verso.pdf
+npm install playwright
+
+python3 generate.py                                   # QR + card.html
+node export-pdf.js                                    # le PDF d'impression
+python3 verify.py --pdf carte-mosaik-recto-verso.pdf  # contrôle de bout en bout
 ```
-
-Ouvrir `card.html` dans un navigateur pour l'aperçu. Le PDF sort en deux pages
-de 85 × 55 mm sans marge : le recto sombre avec le QR à droite, le verso clair
-avec un QR agrandi.
-
-Le contrôle du PDF n'est pas facultatif. Un aperçu correct à l'écran ne dit rien
-du rendu paginé : voir les pièges plus bas.
 
 Options :
 
 ```sh
-python3 generate.py --compact   # retire ADR et NOTE, symbole moins dense
+python3 generate.py --full      # inclut ADR et NOTE dans le QR
+python3 generate.py --accents   # garde les accents dans le QR
 python3 generate.py --ecc Q     # correction d'erreur supérieure
 ```
+
+## Ce que contient le QR
+
+Le QR porte le nom, la fonction, l'organisation, le téléphone, le courriel et
+l'adresse du dépôt. Il ne porte ni l'adresse postale ni la mention des
+affiliations, toutes deux imprimées en clair sur la carte. Les y remettre fait
+passer le symbole de la version 11 à la version 14, soit de 61 à 73 modules,
+et dégrade la lisibilité au scan sans rien apporter au lecteur. `--full` rétablit
+le contenu intégral si le besoin s'en fait sentir.
+
+## Le QR est en ASCII, pas en UTF-8
+
+Un QR en mode octet ne déclare pas son jeu de caractères. La norme suppose
+ISO-8859-1, et un décodeur qui s'y tient lit `MOSAÃK` là où UTF-8 écrivait
+`MOSAÏK`. Un marqueur ECI lèverait l'ambiguïté, mais tous les lecteurs ne le
+traitent pas. Le contenu du QR est donc translittéré : `MOSAIK`, `Ingenieur`,
+et le séparateur `·` devient un tiret.
+
+La carte imprimée garde ses accents : ils ne passent pas par le symbole. Seule
+la fiche enregistrée dans le téléphone les perd, en échange d'une lecture
+identique sur tous les appareils. `verify.py` signale tout contenu non ASCII.
+
+## Densité et lisibilité à l'impression
+
+Valeurs mesurées dans le PDF par `check_pdf.py`, pas déduites de la feuille de
+style. La règle usuelle demande 0,40 mm par module pour un scan fiable en
+lumière médiocre, et descend difficilement sous 0,33 mm.
+
+| Face | Octets | Version | Symbole | mm par module | |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Recto | 238 | 11 | 25,8 mm | 0,422 | ok |
+| Verso | 238 | 11 | 30,2 mm | 0,494 | ok |
+| Recto, `--full` | 347 | 14 | 26,2 mm | 0,360 | limite |
+| Verso, `--full` | 347 | 14 | 30,8 mm | 0,421 | ok |
+
+La configuration par défaut passe le seuil sur les deux faces. C'est le produit
+de deux décisions : sortir l'adresse postale et la note du QR, et porter le
+carré du recto de 30 à 32 mm.
+
+## Quand un téléphone refuse de scanner
+
+`test-scan.py` produit une page A4 portant le même contact à quatre densités
+croissantes et à deux tailles d'impression.
+
+```sh
+python3 test-scan.py
+node export-pdf.js planche-test-scan.pdf planche-test-scan.html
+```
+
+Imprimer à l'échelle réelle, sans ajustement automatique, puis scanner les codes
+dans l'ordre. Le premier qui résiste situe la limite.
+
+| Code | Contenu | Version | Modules |
+| --- | --- | ---: | ---: |
+| A | URL seule | 4 | 33 |
+| B | contact minimal | 9 | 53 |
+| C | contact de la carte | 11 | 61 |
+| D | contact complet | 14 | 73 |
+
+Si A passe et que B résiste, le lecteur ne traite que les URL et laisse tomber
+les fiches de contact : c'est une limite de l'application, pas de la carte, et
+Google Lens prend le relais. Si A, B et C passent et que seul D résiste, c'est
+le contenu du QR qu'il faut alléger. Si aucun ne passe à 40 mm, le problème est
+ailleurs : mise au point, éclairage ou reflet.
+
+Scanner un écran est toujours plus difficile que scanner un tirage papier, à
+cause du rétroéclairage et du moiré. Un téléphone ne peut évidemment pas scanner
+son propre écran.
 
 ## Aucun générateur en ligne
 
 Coller une vCard dans un générateur web transmet un numéro de téléphone, une
 adresse électronique et une adresse postale à un tiers, à chaque rendu si le QR
-est chargé depuis une URL d'API. `card.html` embarque le symbole en PNG dans le
-fichier lui-même : la page ne fait aucune requête réseau, et reste lisible hors
-ligne.
-
-## Densité et lisibilité à l'impression
-
-Le symbole occupe 27 mm de côté sur la carte, à l'intérieur d'un carré blanc de
-30 mm dont la marge prolonge la zone de silence.
-
-Les valeurs ci-dessous sont mesurées dans le PDF par `check_pdf.py`, pas
-déduites de la feuille de style.
-
-| Face | Octets | Version | Symbole | mm par module |
-| --- | ---: | ---: | ---: | ---: |
-| Recto, complète | 350 | 14 | 24,3 mm | 0,333 |
-| Verso, complète | 350 | 14 | 30,6 mm | 0,420 |
-| Recto, compacte | 241 | 11 | 23,9 mm | 0,392 |
-| Verso, compacte | 241 | 11 | 30,1 mm | 0,493 |
-
-La règle usuelle demande 0,40 mm par module pour un scan fiable en lumière
-médiocre, et descend difficilement sous 0,33 mm. Seul le verso franchit ce
-seuil. Le recto reste dans la zone limite : il suppose un offset soigné sur
-papier mat, pas une impression jet d'encre ni un papier brillant.
-
-Trois leviers, par ordre d'efficacité :
-
-1. Utiliser le verso, où le QR passe à 34 mm, soit 0,42 mm par module pour la
-   vCard complète. C'est la seule variante qui sort de la zone limite.
-2. Passer en `--compact`. L'adresse postale et la mention des affiliations sont
-   déjà imprimées en clair sur la carte ; les retirer du QR fait tomber le
-   symbole de la version 14 à la version 11. Le recto passe alors tout juste
-   sous le seuil, à 0,392 mm, et le verso atteint 0,493 mm.
-3. Demander un tirage d'essai à l'imprimeur et le scanner avant de lancer le
-   tirage complet.
-
-Le niveau de correction reste M. Passer à Q ajoute de la redondance mais fait
-grimper le symbole à la version 17, ce qui réduit la taille de module et dégrade
-le résultat net sur une surface aussi petite.
+est chargé depuis une URL d'API. `card.html` embarque le symbole dans le fichier
+lui-même : la page ne fait aucune requête réseau et reste lisible hors ligne.
 
 ## Pièges du rendu paginé
 
-Deux défauts n'apparaissaient qu'à l'impression, l'aperçu écran étant correct.
-Les deux sont désormais verrouillés par `check_pdf.py`, et les règles portent un
-commentaire expliquant pourquoi elles sont écrites ainsi.
+Trois défauts n'apparaissaient qu'à l'impression, l'aperçu écran étant correct.
+Tous sont désormais verrouillés par `check_pdf.py`, et les règles concernées
+portent un commentaire expliquant pourquoi elles sont écrites ainsi.
 
-**Le centrage par `transform`.** Le QR du recto était centré par
-`top: 50%` et `translateY(-50%)`. À l'export PDF, Chromium peignait le carré
-blanc deux fois, à la position transformée et à la position d'origine, et
-abandonnait le tracé du symbole : la carte sortait avec un rectangle blanc vide.
-La cote est maintenant fixée en millimètres, sans transformation.
+**Le centrage par `transform`.** Le QR du recto était centré par `top: 50%` et
+`translateY(-50%)`. À l'export PDF, Chromium peignait le carré blanc deux fois,
+à la position transformée et à la position d'origine, et abandonnait le tracé du
+symbole : la carte sortait avec un rectangle blanc vide. La cote est maintenant
+fixée en millimètres, sans transformation.
 
-**Le tracé vectoriel trop lourd.** Le symbole était d'abord embarqué en SVG
-inline. Un QR de version 14 compte plusieurs milliers de sous-chemins, et
-certains lecteurs PDF renoncent à peindre un tracé aussi lourd, surtout découpé
-par un coin arrondi : la carte s'ouvre alors avec un carré blanc vide. La carte
-embarque donc une image, que tout lecteur sait afficher. À 27 mm, ce PNG imprime
-à plus de 1800 points par pouce, bien au-delà de ce que demande l'offset. Le
-`qr-vcard.svg` reste disponible si l'imprimeur préfère du vectoriel.
+**Le tracé vectoriel trop lourd.** Le symbole était embarqué en SVG inline. Un
+QR de version 14 compte plusieurs milliers de sous-chemins, et un lecteur PDF
+peut renoncer à peindre un tracé aussi lourd, surtout découpé par un coin
+arrondi. La carte embarque donc une image, que tout lecteur sait afficher. À
+29 mm, ce PNG imprime à 1450 points par pouce, bien au-delà de ce que demande
+l'offset.
 
 **La compression par le conteneur flex.** Le QR du verso était déclaré à 34 mm
 mais le conteneur le ramenait à 25 mm, faute de `flex-shrink: 0`, soit une
-densité pire que celle du recto alors que le verso était censé la corriger. La
-mesure dans le PDF confirme aujourd'hui les 30,6 mm de symbole attendus.
+densité pire que celle du recto alors que le verso existe pour la corriger.
 
 Le PDF est contrôlé à 96, 150, 300 et 600 points par pouce : les deux faces
 décodent à chaque résolution, y compris celles d'un lecteur de téléphone.
@@ -116,27 +143,25 @@ La leçon tient en une ligne : sur un imprimé, seul le PDF fait foi.
 
 ## Vérification
 
-`verify.py` décode l'image produite et compare les octets à `vcard.vcf`. Avec
+`verify.py` décode l'image produite et la compare à la vCard attendue. Avec
 `--pdf`, il rastérise en plus chaque page du PDF à 1200 dpi, décode le symbole
 et mesure sa taille réelle sur le papier à partir de sa position rendue. Le
 décodeur est zxing-cpp, la bibliothèque dont dérivent la plupart des
 applications de scan.
 
-À noter : `cv2.QRCodeDetector` d'OpenCV ne détecte pas ce symbole, alors que
-zxing-cpp le lit au bit près, y compris capturé depuis le rendu de la page. La
-faiblesse connue d'OpenCV sur les versions élevées ne dit rien de la lisibilité
-réelle du code. Le script ne s'en sert qu'en secours, et le signale.
+À noter : `cv2.QRCodeDetector` d'OpenCV ne détecte pas ces symboles, alors que
+zxing-cpp les lit au bit près. Cette faiblesse connue d'OpenCV sur les versions
+élevées ne dit rien de la lisibilité réelle. Le script ne s'en sert qu'en
+secours, et le signale.
 
 ## Encodage
 
-La vCard est émise en UTF-8, en mode octet, avec des fins de ligne CRLF comme
-l'exige la RFC 2426. Les caractères accentués de `MOSAÏK`, `Ingénieur` et du
-séparateur `·` sont préservés : le décodage restitue les 350 octets à
-l'identique.
+La vCard est émise en mode octet avec des fins de ligne CRLF, comme l'exige la
+RFC 2426. Le décodage restitue les octets à l'identique.
 
 ## Au scan
 
 Sur iOS, l'appareil photo affiche une bannière de contact ; un appui ouvre la
 fiche pré-remplie avec l'option d'enregistrement. Sur Android, l'appareil photo
-ou Google Lens propose d'ajouter le contact. Aucune application tierce n'est
-nécessaire sur les deux plateformes.
+ou Google Lens propose d'ajouter le contact. Certains appareils photo constructeur
+ne reconnaissent que les URL : voir la planche de diagnostic plus haut.

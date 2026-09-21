@@ -45,16 +45,42 @@ MODULE_MM_SAFE = 0.40
 MODULE_MM_FLOOR = 0.33
 
 # Cote utile du symbole sur la carte, en millimetres : le carre blanc fait
-# 30 mm avec 1,5 mm de marge, soit 27 mm de modules.
-QR_SVG_MM = 27.0
+# 32 mm avec 1,5 mm de marge, soit 29 mm de modules.
+QR_SVG_MM = 29.0
 
 
-def read_vcard(path: pathlib.Path, compact: bool) -> str:
+# Un QR en mode octet n'indique pas son jeu de caracteres : la norme suppose
+# ISO-8859-1, et un decodeur qui s'y tient lit "MOSAÃK" la ou UTF-8 ecrivait
+# "MOSAÏK". zxing et les scanners courants devinent bien, mais rien ne
+# l'impose. Le contenu du QR est donc translittere par defaut. La carte
+# imprimee, elle, garde ses accents : ils ne passent pas par le symbole.
+TRANSLITTERATION = {
+    "Ï": "I", "ï": "i", "É": "E", "é": "e", "È": "E", "è": "e",
+    "Ê": "E", "ê": "e", "À": "A", "à": "a", "Â": "A", "â": "a",
+    "Ô": "O", "ô": "o", "Û": "U", "û": "u", "Ù": "U", "ù": "u",
+    "Ç": "C", "ç": "c", "·": "-", "’": "'", "–": "-", "—": "-",
+}
+
+
+def to_ascii(text: str) -> str:
+    return text.translate(str.maketrans(TRANSLITTERATION))
+
+
+def read_vcard(path: pathlib.Path, full: bool, accents: bool) -> str:
     """Retourne la vCard normalisee en CRLF, comme l'exige la RFC 2426."""
     lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    if compact:
+    if not full:
         lines = [l for l in lines if not l.startswith(("ADR", "NOTE"))]
-    return "\r\n".join(lines) + "\r\n"
+    data = "\r\n".join(lines) + "\r\n"
+    if not accents:
+        data = to_ascii(data)
+    if not accents and not data.isascii():
+        restants = sorted({c for c in data if not c.isascii()})
+        raise SystemExit(
+            "caracteres non ASCII sans equivalent : " + " ".join(restants)
+            + "\nles ajouter a TRANSLITTERATION, ou passer --accents"
+        )
+    return data
 
 
 def build_qr(data: str, ecc: str, border: int):
@@ -106,21 +132,29 @@ def report(label: str, data: str, qr, ecc: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--compact", action="store_true", help="retire ADR et NOTE")
+    ap.add_argument(
+        "--full", action="store_true",
+        help="inclut ADR et NOTE dans le QR (symbole nettement plus dense)",
+    )
+    ap.add_argument(
+        "--accents", action="store_true",
+        help="garde les accents dans le QR au lieu de les translitterer",
+    )
     ap.add_argument("--ecc", choices=sorted(ECC), default="M", help="niveau de correction")
     ap.add_argument("--border", type=int, default=4, help="zone de silence en modules")
     ap.add_argument("--png-scale", type=int, default=24, help="pixels par module du PNG")
     args = ap.parse_args()
 
     source = HERE / "vcard.vcf"
-    data = read_vcard(source, args.compact)
+    data = read_vcard(source, args.full, args.accents)
     qr = build_qr(data, args.ecc, args.border)
-    report("complete" if not args.compact else "compacte", data, qr, args.ecc)
+    retenue = "complete" if args.full else "carte"
+    report(retenue, data, qr, args.ecc)
 
     # Variante non retenue, a titre de comparaison.
-    other = read_vcard(source, not args.compact)
+    other = read_vcard(source, not args.full, args.accents)
     report(
-        "compacte" if not args.compact else "complete",
+        "carte" if args.full else "complete",
         other,
         build_qr(other, args.ecc, args.border),
         args.ecc,
@@ -150,9 +184,9 @@ def main() -> int:
     template = (HERE / "card.template.html").read_text(encoding="utf-8")
     (HERE / "card.html").write_text(template.replace("<!--QR_IMG-->", tag), encoding="utf-8")
 
-    dpi_recto = px / (27.0 / 25.4)
+    dpi_recto = px / (QR_SVG_MM / 25.4)
     print(f"\nqr-vcard.svg   vectoriel, pour l'imprimeur")
-    print(f"qr-vcard.png   {px}x{px} px, soit {dpi_recto:.0f} dpi a 27 mm")
+    print(f"qr-vcard.png   {px}x{px} px, soit {dpi_recto:.0f} dpi a {QR_SVG_MM:.0f} mm")
     print(f"card.html      carte 85x55 mm, QR embarque en PNG")
     return 0
 
