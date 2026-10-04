@@ -4,9 +4,7 @@ A three-node hardware-in-the-loop bench for the MOSAIK distributed avionics
 architecture: heartbeat, leader election, quorum and SAFE-mode logic over CAN,
 with a test suite traced to the architecture requirements.
 
-Parent work: MOSAIK-ADD-0001, a TRL 3 architectural design dossier for a
-distributed fault-tolerant avionics architecture for LEO constellations
-(Swiss patent CH000441/2026).
+Parent work: MOSAIK-ADD-0001, a TRL 3 architectural design dossier for a distributed fault-tolerant avionics architecture for LEO constellations.
 
 ## Status
 
@@ -21,9 +19,7 @@ procured. No measured latency is reported anywhere in this repository.
 
 - A wire protocol specified before implementation, with identifiers, payload
   layout, CRC and timing parameters fixed in `PROTOCOL.md`.
-- A node state machine with no platform dependency — no OS, no heap, no
-  floating point — driven by an injected clock and a transmit callback, so the
-  identical code runs on the host bench and on the target.
+- The protocol core is designed to be portable between the host test environment and a future embedded target. Hardware integration and validation have not yet been performed.
 - A test suite in which each case names the requirement it exercises.
 - Single-leader and quorum invariants enforced by construction: one vote per
   term, step down on a higher term, quorum required to take leadership.
