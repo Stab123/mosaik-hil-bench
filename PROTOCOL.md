@@ -7,14 +7,9 @@
 
 ## 1. Scope
 
-This document specifies the bus protocol and node state machine for a
-three-node hardware-in-the-loop bench built to obtain measured evidence for a
-subset of the MOSAIK architecture requirements. It covers frame formats,
-identifiers, timing parameters and the state machine.
+This document specifies the bus protocol and node state machine for a three-node hardware-in-the-loop bench built to obtain measured evidence for a subset of the MOSAIK architecture requirements. It covers frame formats, identifiers, timing parameters and the state machine.
 
-It does **not** specify the flight architecture. The bench is a reduced
-three-node subset of the six-node concept described in MOSAIK-ADD-0001,
-carrying no payload functions.
+It does not specify the flight architecture. The bench is a reduced three-node subset of the MOSAIK reference architecture, which comprises five embedded nodes and a separate ground segment. The bench carries no payload functions.
 
 ## 2. Scope limitations
 
